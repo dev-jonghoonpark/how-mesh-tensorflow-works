@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Mesh-TensorFlow Works — 어떤 차원이든 이름을 붙여 나눈다</title>
+<meta name="description" content="Mesh-TensorFlow(Shazeer 외, NeurIPS 2018)를 Noam Shazeer의 TF Dev Summit 2019 발표 순서대로 따라가는 인터랙티브 교육 자료. 데이터 병렬의 한계, 장치 배치식 모델 병렬, SPMD와 all-reduce, 메시와 이름 붙은 차원, 두 층 MLP를 b·h·d로 나누는 실행기, 분할된 all-reduce, 금지 레이아웃 판정기, Transformer 레이아웃 계산기, 1D와 2D 메시 비용 비교.">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+:root{
+  color-scheme: light;
+  --surface-1:#fcfcfb;
+  --page:#f9f9f7;
+  --text-primary:#0b0b0b;
+  --text-secondary:#52514e;
+  --muted:#898781;
+  --grid:#e1e0d9;
+  --axis:#c3c2b7;
+  --border:rgba(11,11,11,0.10);
+  --s1:#2a78d6;
+  --s2:#eb6834;
+  --s3:#1baf7a;
+  --s4:#8b5cf6;
+  --s8:#e34948;
+  --warn:#fab219;
+  --warn-text:#9a6400;
+  --good:#0ca30c;
+  --wash:rgba(42,120,214,0.08);
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --surface-1:#1a1a19;
+  --page:#0d0d0d;
+  --text-primary:#ffffff;
+  --text-secondary:#c3c2b7;
+  --muted:#898781;
+  --grid:#2c2c2a;
+  --axis:#383835;
+  --border:rgba(255,255,255,0.10);
+  --s1:#3987e5;
+  --s2:#d95926;
+  --s3:#199e70;
+  --s4:#a78bfa;
+  --s8:#e66767;
+  --warn:#fab219;
+  --warn-text:#fab219;
+  --good:#0ca30c;
+  --wash:rgba(57,135,229,0.14);
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%; scroll-behavior:smooth}
+body{
+  margin:0; background:var(--page); color:var(--text-primary);
+  font-family:system-ui,-apple-system,"Segoe UI","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+  font-size:16px; line-height:1.75; letter-spacing:-0.01em;
+}
+.wrap{max-width:880px;margin:0 auto;padding:0 16px 120px}
+header.hero{padding:56px 0 28px;border-bottom:1px solid var(--border);margin-bottom:8px}
+h1{font-size:clamp(28px,5.2vw,42px);line-height:1.25;margin:0 0 12px;letter-spacing:-0.03em}
+.sub{color:var(--text-secondary);font-size:17px;margin:0}
+.kicker{font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 10px}
+h2{font-size:clamp(21px,3.4vw,27px);margin:56px 0 6px;letter-spacing:-0.02em;line-height:1.3}
+h3{font-size:18px;margin:34px 0 6px;letter-spacing:-0.015em}
+p{margin:12px 0}
+ul,ol{margin:12px 0;padding-left:22px}
+li{margin:6px 0}
+strong{font-weight:650}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.9em;background:var(--wash);padding:1px 5px;border-radius:4px}
+a{color:var(--s1)}
+.demo{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:18px;margin:24px 0}
+.demo h4{margin:0 0 2px;font-size:15px;color:var(--text-primary);font-weight:650}
+.demo .cap{color:var(--muted);font-size:13px;margin:0 0 14px;line-height:1.6}
+canvas{display:block;width:100%;border-radius:8px;background:var(--surface-1);touch-action:manipulation;margin-top:12px}
+.ctrls{display:flex;flex-wrap:wrap;gap:14px 22px;margin:14px 0 4px;align-items:flex-end}
+.ctrl{flex:1 1 210px;min-width:170px}
+.ctrl label{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--text-secondary);margin-bottom:4px;gap:10px}
+.ctrl label b{font-variant-numeric:tabular-nums;color:var(--text-primary);font-weight:650;font-size:13px}
+input[type=range]{width:100%;accent-color:var(--s1);height:22px;margin:0}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+button{font:inherit;font-size:13px;font-weight:600;padding:7px 14px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);transition:background .12s}
+button:hover{background:var(--wash)}
+button[aria-pressed=true]{background:var(--wash);border-color:var(--s1)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--text-secondary);margin:10px 0 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+.readout{display:flex;flex-wrap:wrap;gap:8px 26px;margin-top:12px;font-size:13px;color:var(--text-secondary)}
+.readout b{display:block;font-size:19px;color:var(--text-primary);font-weight:650;line-height:1.3;letter-spacing:-0.02em;font-variant-numeric:tabular-nums}
+.eq{background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--s1);
+  border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0;overflow-x:auto;text-align:center}
+.eq .note{display:block;font-size:12.5px;color:var(--muted);margin:6px 0 0;line-height:1.55;text-align:left}
+.tw{overflow-x:auto;margin:14px 0;border:1px solid var(--border);border-radius:12px;background:var(--surface-1)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);vertical-align:middle}
+th{font-weight:650;font-size:12.5px;color:var(--text-secondary);background:var(--page)}
+tr:last-child td{border-bottom:none}
+td.num,th.num{font-variant-numeric:tabular-nums;text-align:right}
+td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+td.sm{font-size:12px}
+.note{border-left:3px solid var(--axis);padding:2px 0 2px 16px;margin:18px 0;color:var(--text-secondary);font-size:14.5px}
+.key{border:1px solid var(--border);border-left:3px solid var(--s2);background:var(--surface-1);
+  border-radius:0 10px 10px 0;padding:14px 18px;margin:20px 0}
+.key .lbl{font-size:11.5px;font-weight:700;letter-spacing:0.1em;color:var(--s2);display:block;margin-bottom:4px}
+.key p{margin:0}
+nav.toc{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:18px 22px;margin:26px 0}
+nav.toc ol{margin:6px 0 0;padding-left:20px;font-size:14.5px}
+nav.toc a{text-decoration:none;color:var(--text-primary)}
+nav.toc a:hover{color:var(--s1)}
+.q{border:1px solid var(--border);border-radius:10px;background:var(--surface-1);padding:16px 18px;margin:14px 0}
+.q h4{margin:0 0 8px;font-size:15px;color:var(--text-primary)}
+.q .opt{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;border:1px solid var(--border);
+  border-radius:8px;margin:6px 0;cursor:pointer;font-size:14px;transition:border-color .12s}
+.q .opt:hover{border-color:var(--s1)}
+.q .opt input{margin-top:5px;accent-color:var(--s1)}
+.q .opt.correct{border-color:var(--good);background:rgba(12,163,12,0.08)}
+.q .opt.wrong{border-color:var(--s8);background:rgba(227,73,72,0.07)}
+.q .expl{display:none;font-size:13.5px;color:var(--text-secondary);border-left:3px solid var(--good);
+  padding:2px 0 2px 12px;margin-top:10px;line-height:1.65}
+.q .expl.bad{border-left-color:var(--s8)}
+.q .expl.show{display:block}
+.quiz-score{font-size:15px;font-weight:700;margin-top:14px}
+.tog{position:fixed;top:14px;right:14px;z-index:10;border-radius:999px;padding:7px 13px;
+  background:var(--surface-1);border:1px solid var(--border);font-size:12.5px}
+footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}
+footer a{color:var(--text-secondary)}
+.refs{font-size:13px;color:var(--text-secondary);line-height:1.7}
+.info{font-size:13.5px;color:var(--text-secondary);margin-top:10px;line-height:1.7}
+.info b{color:var(--text-primary)}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:9px;overflow:hidden;flex-wrap:wrap}
+.seg button{border:none;border-radius:0;border-right:1px solid var(--border)}
+.seg button:last-child{border-right:none}
+.mini{font-size:12.5px;color:var(--muted);margin:8px 0 0}
+.next{border:1px dashed var(--axis);border-radius:12px;padding:12px 16px;margin:28px 0 0;background:var(--page)}
+.next .lbl{font-size:11.5px;font-weight:700;letter-spacing:0.1em;color:var(--s4);display:block;margin-bottom:2px}
+.next p{margin:0;font-size:14.5px}
+.road{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin:18px 0 0}
+.road span{border:1px solid var(--border);border-radius:999px;padding:3px 10px;background:var(--surface-1)}
+.road em{color:var(--muted);font-style:normal}
+@media (max-width:640px){.tog{position:absolute}}
+/* 이 페이지 전용 */
+.bad{color:var(--s8)}
+.warnx{color:var(--warn-text)}
+.ar{display:inline-block;font-size:11px;font-weight:700;padding:0 7px;border-radius:999px;background:rgba(227,73,72,.12);color:var(--s8);white-space:nowrap}
+table.ops tr[data-k]{cursor:pointer}
+table.ops{min-width:600px}
+table.ops td.mono{white-space:nowrap}
+table.ops tr[data-k]:hover td{background:var(--wash)}
+tr.on td{background:var(--wash)}
+.ranks{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.mgrid{display:inline-grid;gap:4px}
+.mgrid button{padding:5px 0;text-align:center;font-variant-numeric:tabular-nums}
+table.mat{border-collapse:collapse;width:auto;font-size:11.5px;font-variant-numeric:tabular-nums;margin:2px 0}
+table.mat td{padding:1px 5px;border:1px solid var(--border);text-align:right;min-width:24px;line-height:1.5}
+table.mat td.p{color:var(--s1)}
+table.mat td.n{color:var(--s2)}
+.devs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+.dev{border:1px solid var(--border);border-radius:10px;padding:6px 10px 10px;background:var(--page)}
+.dh{font-size:12px;color:var(--text-secondary);font-weight:650;margin:8px 0 4px}
+.pan3{display:flex;flex-wrap:wrap;gap:8px 18px}
+.pan3 .mini{margin:0 0 2px}
+.laysel{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:12px}
+.dsel{display:inline-flex;flex-direction:column;font-size:12px;color:var(--text-secondary);gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+select{font:inherit;font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary)}
+pre.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.6;background:var(--page);border:1px solid var(--border);border-radius:10px;padding:12px 14px;overflow-x:auto;margin:12px 0}
+pre.code .cm{color:var(--muted)}
+pre.code .hl{background:var(--wash);color:var(--s1);font-weight:650}
+p.smp{font-family:Georgia,"Times New Roman",serif;font-size:14.5px;border-left:3px solid var(--s2);padding-left:12px;margin:8px 0;color:var(--text-primary)}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:640px){.split{grid-template-columns:1fr}}
+svg.fig{display:block;width:100%;height:auto;margin:6px 0}
+svg.fig text{font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;fill:var(--text-primary)}
+svg.fig .m{fill:var(--muted)}
+</style>
+</head>
+<body>
+<button class="tog" id="themeBtn" type="button">◐ 다크</button>
+<div class="wrap">
+<header class="hero">
+  <p class="kicker">초거대 모델의 탄생 · 분산 학습</p>
+  <h1>How Mesh-TensorFlow Works — 어떤 차원이든 이름을 붙여 나눈다</h1>
+  <p class="sub">데이터 병렬은 모든 장치에 모델 전체를 올리고 배치만 나눕니다. 모델이 한 장치에 들어가지 않으면 모델 자체를 잘라야 하는데, 그 방법은 모델마다 새로 설계해야 했습니다. Mesh-TensorFlow는 이 둘을 같은 말로 적습니다. 텐서의 차원마다 이름을 붙이고, 장치들을 여러 축을 가진 격자(메시)로 본 뒤, “어떤 이름의 차원을 어떤 메시 축으로 나눌지”만 정하면 됩니다. 이 페이지는 Noam Shazeer의 발표 「<a href="https://www.youtube.com/watch?v=HgGyWS40g-g">Mesh-TensorFlow: Model Parallelism for Supercomputers</a>」(TF Dev Summit 2019, 15분)의 순서를 따라가고, 수식과 수치는 논문 Shazeer 외, 「Mesh-TensorFlow: Deep Learning for Supercomputers」(NeurIPS 2018)에서 가져옵니다.</p>
+</header>
+
+<div class="key">
+  <span class="lbl">이 자료의 축</span>
+  <p><strong>데이터 병렬은 batch 차원을 나누는 레이아웃 하나일 뿐이고, 어떤 차원이든 이름을 붙여 메시 축에 나누면 같은 SPMD 프로그램이 모델 병렬이 된다 — 통신은 나눈 차원을 더해 없애는 곳에서만 생긴다.</strong> 프로그램(수학 모델)은 그대로 두고 레이아웃 한 줄만 바꾸면, 어떤 텐서가 쪼개지고 어떤 텐서가 복제되는지, all-reduce가 어느 연산에서 어느 메시 축을 따라 생기는지가 전부 정해진다.</p>
+</div>
+
+<div class="road"><span>① 데이터 병렬</span><em>→</em><span>② 왜 큰 모델인가</span><em>→</em><span>③ 장치 배치</span><em>→</em><span>④ SPMD</span><em>→</em><span>⑤ 메시와 이름</span><em>→</em><span>⑥ b·h·d 나누기</span><em>→</em><span>⑦ 2D 메시</span><em>→</em><span>⑧ 레이아웃 규칙</span><em>→</em><span>⑨ Transformer</span><em>→</em><span>⑩ 레이아웃 고르기</span><em>→</em><span>⑪ 사용법과 한계</span></div>
+<p class="mini">각 절은 앞 절이 남긴 질문 하나로 끝나고, 다음 절이 그 질문을 풉니다.</p>
+
+<nav class="toc">
+  <strong>학습 경로</strong>
+  <ol>
+    <li><a href="#s1">데이터 병렬: 다들 쓰는 이유와 두 개의 벽</a></li>
+    <li><a href="#s2">왜 큰 모델이 필요한가</a></li>
+    <li><a href="#s3">장치 배치로 하는 모델 병렬과 그 어려움</a></li>
+    <li><a href="#s4">다른 접근: SPMD와 집합 통신</a></li>
+    <li><a href="#s5">메시와 이름 붙은 차원</a></li>
+    <li><a href="#s6">두 층 MLP를 b · h · d로 나누기</a></li>
+    <li><a href="#s7">b와 h를 2차원 메시에 동시에: 분할된 all-reduce</a></li>
+    <li><a href="#s8">레이아웃 = 텐서 차원 → 메시 축: 일반 규칙과 금지 규칙</a></li>
+    <li><a href="#s9">Transformer 레이아웃: vocab · d_ff · heads</a></li>
+    <li><a href="#s10">좋은 레이아웃 고르기: 메시를 1D로 볼까 2D로 볼까</a></li>
+    <li><a href="#s11">사용법 · 결과 · 한계</a></li>
+    <li><a href="#s12">확인 퀴즈</a></li>
+  </ol>
+</nav>
+
+<!-- ───────── 1 ───────── -->
+<h2 id="s1">1. 데이터 병렬: 다들 쓰는 이유와 두 개의 벽</h2>
+<p>발표는 “거의 모든 사람이 신경망을 학습하는 방식”으로 시작합니다. 모든 장치에 모델 전체를 올리고, 학습 배치를 장치 수만큼 작은 덩어리로 나눠 하나씩 맡깁니다. 각 장치가 자기 덩어리로 순전파·역전파를 하고 나면 파라미터 기울기를 모든 장치에 걸쳐 더한 뒤(<strong>all-reduce</strong>) 각자 같은 갱신을 합니다. 논문 알고리즘 1이 이것입니다.</p>
+<div class="eq">$$\nabla Q\big(W^{(t)}, b^{(t)}\big)=\sum_{p'\in P}\nabla Q\big(W^{(t)}, b^{(t)}_{p'}\big)\qquad W^{(t+1)}=\mathrm{Update}\big(W^{(t)},\ \nabla Q(W^{(t)}, b^{(t)})\big)$$
+<span class="note">논문 알고리즘 1. 배치 \(b^{(t)}\)를 장치 집합 \(P\)에 나눈 \(b^{(t)}_p\)로 부분 기울기를 구하고(로컬 계산), 그 합을 all-reduce로 구한 뒤 각자 갱신합니다(로컬 계산).</span></div>
+<p>발표자가 꼽은 장점은 세 가지입니다. <strong>어떤 모델 구조에도 쓸 수 있고</strong>, 장치 하나가 할 일만 적은 SPMD 코드를 컴파일해 모든 장치에 똑같이 보내므로 <strong>컴파일이 빠르고</strong>, 모든 장치가 거의 같은 일을 하니 서로 기다리지 않아 <strong>활용률이 거의 100%</strong>입니다. 통신도 TPU 포드를 비롯한 여러 네트워크에서 빠릅니다.</p>
+<p>문제는 하나, “모델 전체가 모든 장치에 들어가야 한다”는 것입니다. 논문 초록은 여기에 두 가지를 더합니다. 지연 시간이 길고, 배치가 작으면 비효율적입니다. 뒤의 것은 논문 표 1에 식으로 나옵니다. 데이터 병렬의 통신/계산 비율은 \(n/b\), 즉 <strong>장치당 배치의 역수</strong>입니다. 장치를 늘리면서 배치를 같이 키우지 않으면 통신에 묶입니다.</p>
+
+<div class="demo">
+  <h4>데모 1 · 장치를 늘려도 줄지 않는 것, 점점 나빠지는 것</h4>
+  <p class="cap">장치당 메모리는 파라미터 하나에 16바이트(혼합 정밀도 + Adam, <a href="https://dev-jonghoonpark.github.io/how-fsdp-works/#s1">How FSDP Works 1절</a>)로 어림했습니다. 활성값은 넣지 않았습니다. 장치 메모리 한계(빨간 점선)는 가정값이니 바꿔 보세요. 오른쪽 그래프의 n/b는 논문 표 1의 데이터 병렬 행이고, 1이 넘으면 장치에 줄 예제가 1개도 안 됩니다.</p>
+  <div class="ctrls">
+    <div class="ctrl"><label>모델 크기 <b id="d1nv"></b></label><input type="range" id="d1n" min="0" max="8" step="1" value="4"></div>
+    <div class="ctrl"><label>장치 수 n <b id="d1kv"></b></label><input type="range" id="d1k" min="0" max="10" step="1" value="6"></div>
+    <div class="ctrl"><label>전체 배치 b <b id="d1bv"></b></label><input type="range" id="d1b" min="6" max="16" step="1" value="8"></div>
+    <div class="ctrl"><label>장치 메모리 (가정) <b id="d1mv"></b></label><input type="range" id="d1m" min="4" max="80" step="4" value="16"></div>
+  </div>
+  <canvas id="d1cv" height="230"></canvas>
+  <div class="readout" id="d1out"></div>
+</div>
+<p>왼쪽 선은 장치 수를 아무리 늘려도 평평합니다. 데이터 병렬은 계산을 나눌 뿐 모델을 나누지 않기 때문입니다. 5B 모델이면 80GB가 필요하고, 한 장치에 들어가지 않습니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>모델이 한 장치에 들어가야 한다는 제약을 피하는 가장 쉬운 방법은 모델을 작게 만드는 것입니다. 그런데 왜 굳이 그렇게 큰 모델이 필요할까요?</p></div>
+
+<!-- ───────── 2 ───────── -->
+<h2 id="s2">2. 왜 큰 모델이 필요한가</h2>
+<p>발표자는 언어 모델링을 예로 듭니다. 기계 번역, 질의응답, 대화, 감성 분석처럼 쓸 곳이 많고, <strong>모델이 클수록 품질이 좋아집니다</strong>. 큰 모델일수록 세상에 대해 더 많이 알고 더 잘 이해합니다. 데이터도 충분합니다. 웹 텍스트(Common Crawl 등)를 받으면 수십억~수조 단어가 생깁니다. 큰 모델 하나를 학습해 여러 과제에 미세 조정하는 전이 학습(OpenAI, BERT)도 이 방향을 밀어 줍니다.</p>
+<p>발표의 예는 위키피디아로 학습한 Transformer 언어 모델입니다. 에이브러햄 링컨 문서는 학습에 쓰지 않은 검증 세트에 있었습니다. 파라미터 약 1억 개짜리 모델에게 링컨 문서를 지어내게 하면 문법은 대충 맞고 “미국 정치인”이라는 것은 기억하지만, 링컨이 누구였는지 모르고 미국에 총리가 있다고 씁니다. 같은 구조를 50억 개로 키우면 링컨에 대해 훨씬 많은 것을 알아서, 발표자 말로는 “대략 절반은 맞는” 글을 씁니다. 대부분은 여전히 지어낸 이야기지만 모델 크기가 중요하다는 것을 보여 주기엔 충분합니다.</p>
+<p>논문에는 같은 실험의 숫자가 표로 있습니다. Billion-Word 벤치마크에서 d<sub>ff</sub>와 헤드 수만 두 배씩 키운 7개 모델의 퍼플렉시티가 35.0에서 24.0으로 내려가고, logits에 0.9를 곱해 평가하면 23.5로 당시 발표된 최고 기록이었습니다(논문 표 2). 번역(WMT14 En-Fr)에서도 BLEU가 41.8에서 43.9로 올라갑니다(표 3). 부록 C에는 각 모델이 “According to Ray Kurzweil …”를 이어 쓴 문장이 있습니다.</p>
+
+<div class="demo">
+  <h4>데모 2 · 키울수록 좋아진다 (논문 표 2 · 표 3 · 부록 C)</h4>
+  <p class="cap">표 2: Transformer 디코더 언어 모델, d<sub>model</sub> = 1024, d<sub>k</sub> = d<sub>v</sub> = 256, Billion-Word 단어 퍼플렉시티. 표 3: Transformer 번역 모델, d<sub>model</sub> = 1024, d<sub>k</sub> = d<sub>v</sub> = 128. 아래 문장은 부록 C의 무작위 샘플을 그대로 옮겼습니다(모델마다 8개 중 2개).</p>
+  <div class="ctrls">
+    <div><div class="mini" style="margin:0 0 4px">과제</div><div class="seg" id="d2task"><button data-v="lm" aria-pressed="true">언어 모델 (표 2)</button><button data-v="mt" aria-pressed="false">번역 En-Fr (표 3)</button></div></div>
+    <div class="ctrl"><label>샘플을 볼 모델 <b id="d2sv"></b></label><input type="range" id="d2s" min="0" max="3" step="1" value="3"></div>
+  </div>
+  <canvas id="d2cv" height="230"></canvas>
+  <div id="d2txt" style="margin-top:12px"></div>
+</div>
+<p>0.14B 모델의 문장은 그럴듯한 직함 뒤에 아무 말이나 붙입니다. 4.9B 모델은 커즈와일이 『The Singularity is Near』를 썼다는 것을 압니다. 논문의 표현으로 “모든 모델이 대체로 문법적인 문장을 만들지만, 큰 모델일수록 세상 지식을 더 많이 보여 줍니다.”</p>
+<div class="next"><span class="lbl">다음 질문</span><p>50억 개짜리 파라미터는 코어 하나에 들어가지 않습니다. 모델 자체를 여러 장치에 나눠야 합니다(모델 병렬). 지금까지는 어떻게 했고, 무엇이 어려웠을까요?</p></div>
+
+<!-- ───────── 3 ───────── -->
+<h2 id="s3">3. 장치 배치로 하는 모델 병렬과 그 어려움</h2>
+<p>모델 병렬은 모델을 장치들에 나눠 싣는 것입니다. 아주 큰 모델을 학습할 수 있고, 예제 하나의 계산을 여러 장치가 나눠 하니 <strong>추론 지연 시간</strong>에도 유리합니다. 문제는 효율적인 알고리즘을 설계하기가 까다롭다는 것입니다.</p>
+<p>당시 흔한 방법은 <strong>장치 배치(device placement)</strong>였습니다. “이 연산은 이 장치에, 저 연산은 저 장치에” 하고 하나하나 지정합니다. TensorFlow는 이것을 쉽게 해 주지만, 효율적인 배치를 찾는 것은 여전히 사람 몫이고, 2,000개 코어에 보낼 연산을 전부 만들면 그래프가 거대해집니다. 논문 서론은 이것을 “MIMD 구현은 매우 큰 프로그램을 만들어 컴파일하고 최적화하기 어렵다”고 적습니다.</p>
+<p>발표가 드는 예는 Google 신경망 기계 번역(GNMT)입니다. LSTM 8층을 GPU 8대에 한 층씩 나눠 싣고 softmax 층은 다른 곳에 두었습니다. 그냥 두면 한 층이 일하는 동안 나머지 GPU는 놉니다. 모든 GPU를 바쁘게 하려면 “흥미로운 파이프라이닝”이 필요합니다. 동작은 하지만, 발표자 말대로 “제대로 돌게 만드는 데 일이 많이 듭니다.”</p>
+
+<div class="demo">
+  <h4>데모 3 · LSTM 8층을 GPU 8대에 나눠 싣기</h4>
+  <p class="cap">GNMT식 배치를 단순화했습니다. 층 l은 GPU l에, softmax는 9번째 장치에 있습니다. “층마다 끝까지”는 한 층이 문장 전체를 처리한 뒤 다음 층에 넘기는 순서이고, “파이프라이닝”은 토큰 t가 층 l을 지나자마자 층 l+1이 그 토큰을 받는 대각선 순서입니다. 아래 연산 수는 장치 하나 몫이 연산 1,000개라고 했을 때의 어림입니다.</p>
+  <div class="ctrls">
+    <div><div class="mini" style="margin:0 0 4px">스케줄</div><div class="seg" id="d3m"><button data-v="seq" aria-pressed="true">층마다 끝까지</button><button data-v="pipe" aria-pressed="false">파이프라이닝</button></div></div>
+    <div class="ctrl"><label>문장 길이 (토큰) <b id="d3tv"></b></label><input type="range" id="d3t" min="4" max="24" step="1" value="8"></div>
+    <div class="ctrl"><label>장치 수 (그래프 크기용) <b id="d3nv"></b></label><input type="range" id="d3n" min="3" max="11" step="1" value="3"></div>
+  </div>
+  <canvas id="d3cv" height="250"></canvas>
+  <div class="readout" id="d3out"></div>
+</div>
+<p>파이프라이닝으로 활용률을 끌어올릴 수는 있지만 그것은 이 모델, 이 장치 수에 맞춘 설계입니다. 층 수가 바뀌거나 장치가 512개가 되면 다시 설계해야 하고, 장치마다 다른 일을 시키니 그래프의 연산 수도 장치 수에 비례해 늘어납니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>장치마다 다른 일을 시키니 설계도 어렵고 프로그램도 커집니다. 데이터 병렬에는 이 문제가 없었습니다. 데이터 병렬의 무엇이 잘 돌아가게 만든 걸까요?</p></div>
+
+<!-- ───────── 4 ───────── -->
+<h2 id="s4">4. 다른 접근: SPMD와 집합 통신</h2>
+<p>Mesh-TensorFlow는 “완전히 다른 접근”을 택하고, 그 영감을 동기식 데이터 병렬에서 가져옵니다. 세 가지입니다.</p>
+<ol>
+<li><strong>모든 장치가 모든 연산에 참여한다.</strong> 연산 하나를 장치 하나에 맡기지 않고, 모든 장치가 그 연산의 자기 몫을 한다.</li>
+<li><strong>SPMD</strong>(Single Program, Multiple Data): 모든 장치에 같은 프로그램이 돈다. 프로그램 크기가 장치 수와 무관하다.</li>
+<li>장치 사이의 주고받기는 <strong>all-reduce 같은 집합 통신</strong>으로만 한다.</li>
+</ol>
+<p>논문 3절은 데이터 병렬을 이렇게 다시 봅니다. 계산의 모든 텐서와 연산은 “batch” 차원이 있으면 모든 장치에 <strong>나뉘고</strong>, 없으면 모든 장치에 <strong>복제</strong>됩니다. 그리고 <strong>batch 차원을 더해 없애는 연산만</strong> 올바른 결과를 얻기 위해 all-reduce가 더 필요합니다. 데이터 병렬이란 “계산을 batch 차원으로 나누는 것”입니다.</p>
+
+<div class="demo">
+  <h4>데모 4 · 나뉜 차원을 더할 때만 통신이 생긴다</h4>
+  <p class="cap">텐서 x[batch = 8, d = 3]을 batch를 따라 장치들에 나눴습니다(데이터 병렬). 각 장치는 같은 프로그램 <code>reduce_sum</code>을 자기 조각에 돌립니다. 더해 없애는 차원이 나뉜 batch면 부분합만 나오고 all-reduce가 필요하고, 나뉘지 않은 d면 통신 없이 끝납니다. 숫자는 실제로 계산한 값입니다.</p>
+  <div class="ctrls">
+    <div><div class="mini" style="margin:0 0 4px">장치 수</div><div class="seg" id="d4n"><button data-v="1" aria-pressed="false">1</button><button data-v="2" aria-pressed="true">2</button><button data-v="4" aria-pressed="false">4</button></div></div>
+    <div><div class="mini" style="margin:0 0 4px">더해 없앨 차원</div><div class="seg" id="d4r"><button data-v="batch" aria-pressed="true">batch (나뉜 차원)</button><button data-v="d" aria-pressed="false">d (나뉘지 않은 차원)</button></div></div>
+  </div>
+  <div class="devs" id="d4devs"></div>
+  <div class="info" id="d4out"></div>
+</div>
+<p>파라미터 기울기 \(\partial L/\partial W=\sum_{\text{batch}} x^\top \delta\)가 정확히 이 경우입니다. 그래서 데이터 병렬에서는 순전파에 통신이 없고, 역전파의 파라미터 기울기에서만 all-reduce가 생깁니다. all-reduce는 장치들이 트리나 토러스처럼 연결되어 있으면 대역폭 효율적으로 구현할 수 있고, 걸리는 시간은 조각 하나의 크기를 링크 대역폭으로 나눈 것에 비례합니다(논문 6절, 8.6절).</p>
+<div class="next"><span class="lbl">다음 질문</span><p>이 규칙에는 “batch”라는 이름 말고는 데이터 병렬만의 것이 없습니다. batch 대신 다른 차원을 나누면 어떻게 될까요? 그러려면 먼저 차원에 이름이 있어야 하고, 장치들을 여러 축이 있는 격자로 볼 수 있어야 합니다.</p></div>
+
+<!-- ───────── 5 ───────── -->
+<h2 id="s5">5. 메시와 이름 붙은 차원</h2>
+<p>논문이 가정하는 하드웨어는 <strong>같은 종류의 믿을 만한 프로세서들</strong>이고, 각자 로컬 메모리를 갖고 서로 잘 연결되어 있습니다(2절). TPU 포드가 그렇습니다. 이 프로세서들을 n차원 배열로 늘어놓은 것을 <strong>메시</strong>라고 부릅니다.</p>
+<p>메시는 <strong>이름 붙이기 위한 추상</strong>일 뿐 물리 네트워크 모양을 뜻하지 않습니다. 16 × 16 × 2 토러스로 연결된 512코어 TPU를 [16, 16, 2]짜리 3차원 메시로 볼 수도, [32, 16]짜리 2차원 메시로, [512]짜리 1차원 메시로 볼 수도 있습니다. 다만 성능은 물리 배선의 영향을 받습니다. 특히 메시 축 일부로 묶은 그룹 안에서 하는 all-reduce가 중요한데, 그 그룹이 물리적으로 붙어 있으면 매우 효율적입니다.</p>
+<p>새로 들어오는 요소는 셋입니다(논문 4절).</p>
+<ul>
+<li><strong>텐서의 차원에 이름이 있다.</strong> <code>mtf.Dimension("batch", b)</code>처럼 이름과 크기를 함께 적습니다. 그래서 “batch”라는 논리적 차원이 서로 다른 텐서와 연산에서 똑같이 나뉩니다. 한 텐서에 같은 이름의 차원이 두 개 있으면 안 됩니다.</li>
+<li><strong>메시의 차원에도 이름이 있다.</strong> 예: <code>[("rows", r), ("cols", c)]</code>.</li>
+<li><strong>전역 계산 레이아웃</strong>은 텐서 차원 → 메시 차원의 <em>부분 함수</em>입니다. 데이터 병렬은 <code>[("batch", "all_processors")]</code>입니다.</li>
+</ul>
+<p>각 텐서의 레이아웃은 전역 레이아웃을 그 텐서의 차원으로 <strong>제한</strong>한 것이고, <strong>단사</strong>여야 합니다. 한 텐서의 두 차원이 같은 메시 축에 매핑되면 금지입니다. 레이아웃이 비어 있으면 그 텐서는 모든 장치에 통째로 복제됩니다. (텐서 차원, 메시 차원) 쌍마다 장치는 그 텐서 차원을 자기 메시 좌표에 해당하는 띠만큼 잘라 갖습니다. 현재 구현은 텐서 차원 크기가 메시 차원 크기로 나누어떨어져야 합니다(5절).</p>
+
+<div class="demo">
+  <h4>데모 5 · 물리 장치 8개를 여러 메시로 보기</h4>
+  <p class="cap">물리 보드는 2 × 4로 고정입니다. 랭크는 물리 위치의 행 우선 번호이고, 메시 좌표는 랭크를 메시 모양으로 다시 읽은 것입니다. 장치를 누르면 그 장치와 메시 축마다 같은 그룹(그 축으로 all-reduce 할 때 함께 더하는 장치)이 색 테두리로 표시됩니다. [4, 2]로 보면 rows 그룹이 물리 보드에서 떨어져 있는 것을 확인해 보세요.</p>
+  <div class="ctrls">
+    <div><div class="mini" style="margin:0 0 4px">논리 메시</div><div class="seg" id="d5m"><button data-v="[8]" aria-pressed="false">[8]</button><button data-v="[2,4]" aria-pressed="true">[2, 4]</button><button data-v="[4,2]" aria-pressed="false">[4, 2]</button><button data-v="[2,2,2]" aria-pressed="false">[2, 2, 2]</button></div></div>
+    <div class="laysel" style="margin:0"><label class="dsel"><span>batch (8)</span><select id="d5b"></select></label><label class="dsel"><span>hidden (8)</span><select id="d5h"></select></label></div>
+  </div>
+  <canvas id="d5cv" height="250"></canvas>
+  <div class="info" id="d5out"></div>
+</div>
+<div class="next"><span class="lbl">다음 질문</span><p>이름 붙은 차원과 메시, 레이아웃이 준비됐습니다. 실제 계산에 대 봅시다. 발표와 논문이 쓰는 예제는 층 두 개짜리 MLP입니다. batch를 나누면 데이터 병렬이라는 건 알았습니다. hidden을 나누면, io를 나누면 무엇이 달라질까요?</p></div>
+
+<!-- ───────── 6 ───────── -->
+<h2 id="s6">6. 두 층 MLP를 b · h · d로 나누기</h2>
+<p>논문 8절의 예제는 신경망 가운데에 있는 완전연결층 두 개입니다. 입력 x와 출력 y는 d<sub>io</sub>개 유닛, 은닉 h는 d<sub>h</sub>개 유닛이고, 은닉층에 편향과 ReLU가 있습니다. 발표에서는 d<sub>io</sub>를 d, d<sub>h</sub>를 h, 배치 크기를 b라고 부릅니다.</p>
+<div class="eq">$$y=\mathrm{Relu}(xw+\mathit{bias})\,v\qquad x:[\text{batch},\text{io}],\ \ w:[\text{io},\text{hidden}],\ \ v:[\text{hidden},\text{io}]$$
+<span class="note">논문 식 (1). Mesh-TensorFlow 코드로는 <code>h = mtf.relu(mtf.einsum(x, w, output_shape=[batch, hidden]) + bias)</code>, <code>y = mtf.einsum(h, v, output_shape=[batch, io])</code> 두 줄입니다. 이 코드는 수학 모델만 정의하고, 어떤 레이아웃으로 돌려도 결과는 같습니다.</span></div>
+<p>여기서 einsum은 모든 입력을 차원의 합집합 모양으로 브로드캐스트해 원소별로 곱한 뒤, 출력에 없는 차원을 더해 없애는 연산입니다. 분산 버전은 장치마다 자기 조각으로 einsum을 하고, <strong>더해 없앤 차원이 나뉜 메시 축을 따라 all-reduce</strong>합니다(논문 6절). 이 한 문장이 모든 레이아웃의 통신을 결정합니다.</p>
+<ul>
+<li><strong>b 나누기</strong>(8.1절): batch가 있는 x, h, y는 나뉘고, batch가 없는 w, v, bias는 복제됩니다. 순전파에는 통신이 없습니다. 기울기 dw, dv는 batch를 더해 없애므로 all-reduce가 생기고, 장치당 값은 파라미터 수 ≈ 2d<sub>io</sub>d<sub>h</sub>입니다.</li>
+<li><strong>h 나누기</strong>(8.2절): hidden이 없는 x, y는 복제되고, h와 w, v, bias는 hidden을 따라 나뉩니다. y를 계산할 때 나뉜 hidden을 더해 없애므로 all-reduce가 생기고, 역전파의 dx에서도 같습니다. 장치당 2bd<sub>io</sub>입니다.</li>
+<li><strong>d 나누기</strong>(발표에서 언급): 나뉘는 텐서와 복제되는 텐서가 뒤바뀌고 통신 위치도 달라집니다. 같은 규칙으로 따지면 xw와 dh에서 io를 더해 없애므로 장치당 2bd<sub>h</sub>입니다.</li>
+</ul>
+
+<div class="demo exec" id="ex1">
+  <h4>데모 6 · 두 층 MLP 실행기 (1차원 메시)</h4>
+  <p class="cap">b = 8, d<sub>io</sub> = 4, d<sub>h</sub> = 8인 작은 정수 행렬로 순전파와 역전파(손실 ½‖y − t‖²)를 장치마다 실제로 계산합니다. 그림은 논문 부록 A의 배치를 따랐습니다. 곱 C = AB에서 A는 C의 왼쪽, B는 C의 위에 있습니다. 블록의 숫자는 그 조각을 가진 장치이고, 파란 블록이 고른 장치의 몫입니다. 마지막 줄의 “최대 오차”는 장치별 결과를 모아 단일 장치 결과와 비교한 값입니다. 연산 표의 행을 누르면 그 연산의 장치별 계산을 아래에서 볼 수 있습니다.</p>
+  <div class="ctrls"><div><div class="mini" style="margin:0 0 4px">메시</div><div class="seg" data-r="mesh"></div></div></div>
+  <div class="laysel"><label class="dsel"><span>batch (b = 8)</span><select data-d="batch"></select></label><label class="dsel"><span>io (d_io = 4)</span><select data-d="io"></select></label><label class="dsel"><span>hidden (d_h = 8)</span><select data-d="hidden"></select></label></div>
+  <div class="btns" data-r="pre"></div>
+  <div class="ranks"><span class="mini" style="margin:0">장치 고르기</span><div data-r="ranks" class="ranks" style="margin:0"></div></div>
+  <canvas height="360"></canvas>
+  <div class="info" data-r="msg"></div>
+  <div class="readout" data-r="out"></div>
+  <div class="tw"><table class="ops" data-r="ops"></table></div>
+  <div data-r="pan"></div>
+</div>
+<p>세 가지를 확인할 수 있습니다. 첫째, 어떤 레이아웃이든 최대 오차는 0입니다. 같은 프로그램이 같은 답을 냅니다. 둘째, 장치당 곱셈은 셋 다 1/4로 줄지만(io 나누기는 dbias 몫이 조금 더 남습니다) <strong>통신은 위치도 양도 다릅니다</strong>. b를 나누면 통신이 파라미터 크기(d<sub>io</sub>d<sub>h</sub>)에, h를 나누면 활성 크기(bd<sub>io</sub>)에 비례합니다. 셋째, [8]을 고르고 io를 나누면 실행이 거부됩니다. d<sub>io</sub> = 4는 8로 나누어떨어지지 않습니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>b를 나누면 모델이 클수록, h를 나누면 배치가 클수록 통신이 늘어납니다. 메시가 2차원이라면 batch는 한 축에, hidden은 다른 축에 동시에 나눌 수 있지 않을까요?</p></div>
+
+<!-- ───────── 7 ───────── -->
+<h2 id="s7">7. b와 h를 2차원 메시에 동시에: 분할된 all-reduce</h2>
+<p>r × c 메시에서 batch를 rows에, hidden을 cols에 나눕니다(논문 8.3절).</p>
+<pre class="code">mesh_shape = [("rows", r), ("cols", c)]
+computation_layout = [("batch", "rows"), ("hidden", "cols")]</pre>
+<p>각 행의 장치들이 배치의 일부를, 각 열의 장치들이 은닉 유닛의 일부를 맡습니다. x는 장치마다 [b/r, d<sub>io</sub>] 조각을 갖고 같은 행의 장치끼리는 똑같은 조각입니다. h는 batch와 hidden을 둘 다 가지므로 두 축으로 <strong>타일링</strong>되어 장치마다 [b/r, d<sub>h</sub>/c]를 갖습니다.</p>
+<p>통신은 여러 곳에서 생기지만 <strong>메시 전체가 아니라 한 축을 따라서만</strong> 합니다. y를 계산할 때 더해 없애는 hidden은 cols 축에 나뉘어 있으니, rows 좌표가 같은 장치끼리(한 행 안에서)만 더하면 됩니다. 반대로 dw, dv는 rows에 나뉜 batch를 더해 없애므로 한 열 안에서만 더합니다. 이것이 <strong>분할된(partitioned) all-reduce</strong>입니다.</p>
+<div class="eq">$$\text{장치당 all-reduce 값}=\frac{2\,b\,d_{io}}{r}+\frac{2\,d_{io}\,d_h}{c}$$
+<span class="note">논문 8.3절. 앞 항은 cols 축(y, dx), 뒤 항은 rows 축(dv, dw)의 몫입니다. 3차원 메시 r × c × p에서 io까지 planes에 나누면 모든 행렬이 두 메시 축으로 타일링되고 세 번째 축으로 복제되며, einsum마다 메시 축 하나를 따라 all-reduce가 생깁니다.</span></div>
+
+<div class="demo exec" id="ex2">
+  <h4>데모 7 · 2D · 3D 메시 실행기</h4>
+  <p class="cap">데모 6과 같은 행렬, 같은 프로그램입니다. 연산 표의 “그룹”은 all-reduce에서 함께 더하는 장치 묶음입니다. 2 × 2에서 y는 {0,1}, {2,3}끼리, dw는 {0,2}, {1,3}끼리 더합니다. 마지막 프리셋은 금지 레이아웃입니다.</p>
+  <div class="ctrls"><div><div class="mini" style="margin:0 0 4px">메시</div><div class="seg" data-r="mesh"></div></div></div>
+  <div class="laysel"><label class="dsel"><span>batch (b = 8)</span><select data-d="batch"></select></label><label class="dsel"><span>io (d_io = 4)</span><select data-d="io"></select></label><label class="dsel"><span>hidden (d_h = 8)</span><select data-d="hidden"></select></label></div>
+  <div class="btns" data-r="pre"></div>
+  <div class="ranks"><span class="mini" style="margin:0">장치 고르기</span><div data-r="ranks" class="ranks" style="margin:0"></div></div>
+  <canvas height="360"></canvas>
+  <div class="info" data-r="msg"></div>
+  <div class="readout" data-r="out"></div>
+  <div class="tw"><table class="ops" data-r="ops"></table></div>
+  <div data-r="pan"></div>
+</div>
+<p>2 × 2에서 장치당 all-reduce 값은 68개로, 1차원 b 나누기(72)나 h 나누기(64)와 비슷하지만 계산은 똑같이 1/4입니다. 장난감 크기에선 차이가 작습니다. 진짜 이점은 크기를 키울 때 나옵니다(10절). 그리고 all-reduce 그룹이 2대씩이라 4대 전체를 묶는 것보다 짧은 거리에서 끝납니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>지금까지 본 레이아웃은 모두 “어떤 텐서 차원을 어떤 메시 축에 나누나”라는 짧은 목록이었습니다. 이 목록에 대한 일반 규칙을 정리하면 어떻게 될까요? 그리고 어떤 목록은 왜 쓸 수 없을까요?</p></div>
+
+<!-- ───────── 8 ───────── -->
+<h2 id="s8">8. 레이아웃 = 텐서 차원 → 메시 축: 일반 규칙과 금지 규칙</h2>
+<p>발표는 일반형을 한 문장으로 말합니다. “모든 텐서 차원에 이름을 주고, 레이아웃을 텐서 차원에서 메시 차원으로 가는 사상으로 정의한다.” 레이아웃이 정해지면 연산마다 할 일이 기계적으로 정해집니다(논문 6절).</p>
+<div class="tw"><table>
+<thead><tr><th>연산</th><th>장치마다 하는 일</th><th>통신</th></tr></thead>
+<tbody>
+<tr><td>원소별 연산 (relu, +)</td><td>자기 조각에 그대로</td><td>없음</td></tr>
+<tr><td>축소 (reduce_sum, reduce_max)</td><td>자기 조각을 로컬 축소</td><td>더해 없앤 차원이 나뉜 메시 축마다 all-reduce</td></tr>
+<tr><td>einsum (행렬곱 등)</td><td>자기 조각끼리 einsum</td><td>더해 없앤 차원이 나뉜 메시 축마다 all-reduce</td></tr>
+<tr><td>reshape: 입력에서 나뉜 차원이 출력에서 안 나뉨</td><td>—</td><td>그 메시 축으로 all-gather</td></tr>
+<tr><td>reshape: 출력에서만 나뉨</td><td>자기 몫을 잘라 냄</td><td>없음</td></tr>
+<tr><td>reshape: 입력·출력에서 서로 다른 차원이 같은 메시 축에</td><td>—</td><td>all-to-all (층마다 데이터 병렬 ↔ 모델 병렬을 바꿀 때)</td></tr>
+</tbody></table></div>
+<p>쓸 수 없는 레이아웃은 두 종류입니다.</p>
+<ul>
+<li><strong>금지</strong>(8.5절): 한 텐서의 두 차원이 같은 메시 축에 매핑되는 레이아웃. 1차원 메시에서 <code>[("batch", "all"), ("hidden", "all")]</code>은 h[batch, hidden] 때문에 금지입니다. 크기가 메시 축으로 나누어떨어지지 않아도 지금 구현에서는 쓸 수 없습니다.</li>
+<li><strong>비효율</strong>(8.4절): 결과는 맞지만 시간도 메모리도 줄지 않는 레이아웃. 빈 레이아웃 <code>[]</code>이 극단적인 예입니다. 효율적이려면 <strong>비싼 연산이 모든 메시 축에서 나뉘어야</strong> 합니다(복제되면 안 됩니다). 경험칙: 비싼 einsum은 메시 축마다 그 축에 나뉜 입력 차원을 하나씩 가져야 합니다.</li>
+</ul>
+
+<div class="demo" id="jg1">
+  <h4>데모 8 · 레이아웃 판정기 (두 층 MLP, 실제 크기)</h4>
+  <p class="cap">b = 512, d<sub>io</sub> = 1,024, d<sub>h</sub> = 4,096인 두 층 MLP를 장치 8대에 놓습니다. 차원마다 메시 축을 고르면 텐서별 조각과 판정(금지·나누어떨어짐), einsum별 all-reduce 축과 장치당 값, 그리고 <strong>나뉘지 않아 같은 계산을 반복하는 메시 축</strong>을 보여 줍니다.</p>
+  <div class="ctrls"><div><div class="mini" style="margin:0 0 4px">메시</div><div class="seg" data-r="mesh"></div></div></div>
+  <div class="laysel" data-r="sels"></div>
+  <div class="btns" data-r="pre"></div>
+  <div class="info" data-r="verdict"></div>
+  <div class="tw"><table data-r="tens"></table></div>
+  <div class="tw"><table data-r="ops"></table></div>
+</div>
+<p>“batch만, 2D 메시”를 눌러 보세요. 합법이고 결과도 맞지만, cols 축으로는 아무것도 나뉘지 않아 같은 행렬곱을 4대가 반복합니다. 장치 8대를 샀는데 2대 몫만 쓰는 셈입니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>규칙은 정리됐습니다. 이제 실제로 큰 모델, Transformer에 적용해 봅니다. Transformer에는 batch, length, d_model, heads, d_k, d_ff, vocab 같은 차원이 있습니다. 어느 것을 나눠야 금지에도 비효율에도 걸리지 않을까요?</p></div>
+
+<!-- ───────── 9 ───────── -->
+<h2 id="s9">9. Transformer 레이아웃: vocab · d_ff · heads</h2>
+<p>논문이 Transformer에 쓴 모델 병렬 레이아웃은 이것입니다(9절).</p>
+<pre class="code">mesh_shape = [("all", n)]
+computation_layout = [("vocab", "all"), ("d_ff", "all"), ("heads", "all")]</pre>
+<p>어휘 크기, FFN 은닉층 크기, 어텐션 헤드 수를 각각 모든 장치에 나눕니다. 이 레이아웃이 통하는 이유를 논문은 한 문장으로 적습니다. <strong>“모델의 모든 비싼 연산이 이 차원들 중 정확히 하나를 갖고, 어떤 텐서도 둘 이상을 갖지 않는다.”</strong> 정확히 하나라서 모든 비싼 연산이 나뉘고(비효율 아님), 둘 이상인 텐서가 없어서 금지에 걸리지 않습니다. 두 층 예제의 h 나누기처럼, 이 차원들을 장치 수에 비례해 키우면 장치당 메모리와 통신 부담이 일정하게 유지됩니다. 실제로 저자들은 은닉층과 헤드 수를 키우면서 TPU 클러스터도 키웠고(어휘는 그대로), 비슷한 성능 특성을 확인했습니다.</p>
+<p>장치를 더 쓰려면 데이터 병렬과 섞습니다.</p>
+<pre class="code">mesh_shape = [("rows", r), ("cols", c)]
+computation_layout = [("batch", "rows"), ("vocab", "cols"), ("d_ff", "cols"), ("heads", "cols")]</pre>
+<p>batch를 r에 비례해, 모델 차원을 c에 비례해 키우면 성능이 유지됩니다. 이 레이아웃으로 d<sub>ff</sub> 최대 262,144, 헤드 최대 256개인 모델을 TPUv2 16 × 32 = 512코어에서 학습했고, 가장 큰 모델에서도 계산 효율 50% 이상(최대 11.5 PFLOP/s 중 6 PFLOP/s)을 유지했습니다. Billion-Word 실험의 배치는 256토큰 시퀀스 256개였고, 배치는 크기 16인 메시 축에, 모델 차원은 크기 32인 축에 나눴습니다. 4.9B 모델은 512코어에서 10에폭에 13시간 걸렸습니다(9.1절).</p>
+
+<div class="demo" id="jg2">
+  <h4>데모 9a · Transformer 레이아웃 판정기</h4>
+  <p class="cap">디코더 층 하나의 텐서와 순전파 einsum입니다. 크기는 논문 표 2를 따랐고(d<sub>model</sub> 1,024, d<sub>k</sub> 256, 배치 256 × 길이 256), 어휘 크기는 논문에 없어 65,536으로 가정했습니다. memory_length는 키·값 쪽 길이로, length와 이름만 다른 같은 크기 차원입니다. 슬라이더로 표 2의 행(d<sub>ff</sub>, heads)을 바꾸면 나누어떨어짐 판정이 바뀝니다.</p>
+  <div class="ctrls"><div><div class="mini" style="margin:0 0 4px">메시</div><div class="seg" data-r="mesh"></div></div>
+    <div class="ctrl" data-r="rowwrap"><label>표 2의 행 <b data-r="rowv"></b></label><input type="range" data-r="row" min="0" max="6" step="1" value="3"></div></div>
+  <div class="laysel" data-r="sels"></div>
+  <div class="btns" data-r="pre"></div>
+  <div class="info" data-r="verdict"></div>
+  <div class="tw"><table data-r="tens"></table></div>
+  <div class="tw"><table data-r="ops"></table></div>
+</div>
+<p>몇 가지를 눌러 보면 이 레이아웃이 왜 골라졌는지 보입니다. <strong>d_model만 나누기</strong>는 합법이지만 어텐션 점수(logits)와 가중합(o) einsum에 d_model이 없어서 32대가 같은 어텐션을 반복합니다. <strong>d_model·d_ff</strong>는 w_1[d_model, d_ff]과 w_2[d_ff, d_model]가, <strong>length·memory_length</strong>는 logits가 금지 규칙에 걸립니다. <strong>512코어를 1D로</strong> 보면 헤드 수(최대 256)를 512로 나눌 수 없습니다. 512코어를 16 × 32 메시로 본 이유 중 하나입니다.</p>
+
+<div class="demo">
+  <h4>데모 9b · Transformer 레이아웃 계산기 (장치당 파라미터 · 계산 · 통신)</h4>
+  <p class="cap">batch → rows, vocab·d_ff·heads → cols 레이아웃입니다. 논문은 층 수와 어휘 크기를 적지 않았는데, 층 6개 + 층 밖 파라미터 6,740만 개(임베딩으로 보고 vocab을 따라 나눔)로 두면 표 2의 일곱 행이 모두 ±0.01B 안에서 맞아 이 값을 썼습니다. 계산은 6 × 파라미터 × 토큰에 어텐션 점수 계산을 더한 어림입니다. 통신은 이 계산기의 셈법입니다. einsum 하나당 all-reduce 하나로 세서, cols 축은 층마다 순전파 2번(어텐션 출력, FFN 출력)과 역전파 4번(q·k·v 투영, FFN 입력), 어휘 쪽 2번을 [b/r, 길이, d<sub>model</sub>] 크기로 더하고, rows 축은 장치가 가진 파라미터 기울기를 한 번 더합니다.</p>
+  <div class="ctrls">
+    <div class="ctrl"><label>모델 (표 2의 행) <b id="d9rowv"></b></label><input type="range" id="d9row" min="0" max="6" step="1" value="6"></div>
+    <div class="ctrl"><label>rows r (batch) <b id="d9rv"></b></label><input type="range" id="d9r" min="0" max="4" step="1" value="4"></div>
+    <div class="ctrl"><label>cols c (모델 차원) <b id="d9cv"></b></label><input type="range" id="d9c" min="0" max="5" step="1" value="5"></div>
+  </div>
+  <div class="btns"><button id="d9paper" type="button">논문 설정: 4.9B · 16 × 32</button></div>
+  <div class="readout" id="d9out"></div>
+  <div class="tw"><table id="d9tab"></table></div>
+</div>
+<p>논문 설정(4.9B, 16 × 32)에서 장치당 파라미터는 약 1억 5천만 개입니다. 전체의 1/32이고, fp32 가중치만 치면 0.6GB입니다. 표에서 c를 고정하고 모델을 키우면 장치당 파라미터와 계산이 함께 늘어 통신/계산 비율은 오히려 줄어듭니다. 거꾸로 모델을 고정하고 c를 키우면 비율이 커집니다. “모델 차원을 c에 비례해 키우면 성능이 유지된다”는 말이 이것입니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>같은 모델, 같은 장치 수에도 쓸 수 있는 레이아웃은 여러 개입니다. 그중 무엇이 좋은지는 어떻게 고를까요?</p></div>
+
+<!-- ───────── 10 ───────── -->
+<h2 id="s10">10. 좋은 레이아웃 고르기: 메시를 1D로 볼까 2D로 볼까</h2>
+<p>발표자는 솔직하게 말합니다. 좋은 레이아웃을 고르는 일은 “지금으로서는 잘 훈련된 사람”이 해야 합니다. 지켜야 할 것은 세 가지입니다. 비싼 연산은 전부 나뉘어야 하고, 한 텐서의 두 차원을 같은 메시 축에 나눌 수 없고, 어떤 차원을 자르느냐에 따라 통신이 많아지거나 적어집니다. 데이터 병렬이면 배치가 커야 하고, 은닉층을 자르면 은닉층이 커야 합니다.</p>
+<p>논문 표 1은 두 층 예제의 레이아웃별 비용을 정리합니다(상수와 저차항 생략).</p>
+<div class="tw"><table>
+<thead><tr><th>레이아웃</th><th>계산 시간</th><th>통신 시간</th><th>통신 / 계산</th><th>장치당 메모리</th></tr></thead>
+<tbody>
+<tr><td class="mono sm">[]</td><td>\(bd_{io}d_h\)</td><td>0</td><td>0</td><td>\(bd_{io}+bd_h+d_{io}d_h\)</td></tr>
+<tr><td class="mono sm">[("batch","all")]</td><td>\(\frac{bd_{io}d_h}{n}\)</td><td>\(d_{io}d_h\)</td><td>\(\frac{n}{b}\)</td><td>\(\frac{b}{n}d_{io}+\frac{b}{n}d_h+d_{io}d_h\)</td></tr>
+<tr><td class="mono sm">[("hidden","all")]</td><td>\(\frac{bd_{io}d_h}{n}\)</td><td>\(d_{io}b\)</td><td>\(\frac{n}{d_h}\)</td><td>\(bd_{io}+\frac{bd_h}{n}+\frac{d_{io}d_h}{n}\)</td></tr>
+<tr><td class="mono sm">[("batch","rows"), ("hidden","cols")]</td><td>\(\frac{bd_{io}d_h}{rc}\)</td><td>\(d_{io}\big(\frac{b}{r}+\frac{d_h}{c}\big)\)</td><td>\(\frac{c}{d_h}+\frac{r}{b}\)</td><td>\(\frac{b}{r}d_{io}+\frac{b}{r}\frac{d_h}{c}+\frac{d_{io}d_h}{c}\)</td></tr>
+<tr><td class="mono sm">+ ("io","planes")</td><td>\(\frac{bd_{io}d_h}{rcp}\)</td><td>\(\frac{bd_{io}}{rp}+\frac{bd_h}{rc}+\frac{d_{io}d_h}{pc}\)</td><td>\(\frac{c}{d_h}+\frac{p}{d_{io}}+\frac{r}{b}\)</td><td>\(\frac{bd_{io}}{rp}+\frac{bd_h}{rc}+\frac{d_{io}d_h}{pc}\)</td></tr>
+</tbody></table></div>
+<p>통신/계산 열이 핵심입니다. 이 값에 비례해 네트워크에 묶이고, 비례 상수는 하드웨어의 통신·계산 속도 비가 정합니다. 데이터 병렬은 장치당 배치의 역수 n/b, 모델 병렬은 장치당 은닉 유닛 수의 역수 n/d<sub>h</sub>입니다. 2D 레이아웃의 c/d<sub>h</sub> + r/b는 <strong>장치 수(rc)를 제곱으로 늘려도 배치와 은닉층은 선형으로만 키우면</strong> 같은 효율을 유지한다는 뜻이고, 3D는 세제곱입니다(8.6절).</p>
+
+<div class="demo">
+  <h4>데모 10 · 같은 n대를 [n]으로 볼까 [r, c]로 볼까</h4>
+  <p class="cap">표 1의 식을 그대로 계산합니다. 막대는 메시 모양 r × c마다의 통신/계산 비율(batch → rows, hidden → cols)이고, 크기 1인 축의 항은 통신이 없으니 뺐습니다. 왼쪽 끝 1 × n은 순수 모델 병렬, 오른쪽 끝 n × 1은 순수 데이터 병렬(주황), 초록이 가장 좋은 2D입니다. 보라색 점은 장치당 메모리입니다.</p>
+  <div class="ctrls">
+    <div class="ctrl"><label>장치 수 n <b id="d10nv"></b></label><input type="range" id="d10n" min="2" max="10" step="1" value="9"></div>
+    <div class="ctrl"><label>배치 b <b id="d10bv"></b></label><input type="range" id="d10b" min="6" max="18" step="1" value="14"></div>
+    <div class="ctrl"><label><span>은닉 d<sub>h</sub></span> <b id="d10hv"></b></label><input type="range" id="d10h" min="8" max="18" step="1" value="15"></div>
+    <div class="ctrl"><label><span>입출력 d<sub>io</sub></span> <b id="d10iv"></b></label><input type="range" id="d10i" min="8" max="14" step="1" value="10"></div>
+  </div>
+  <canvas id="d10cv" height="280"></canvas>
+  <div class="readout" id="d10out"></div>
+</div>
+<p>b와 d<sub>h</sub>가 비슷할 때는 r과 c를 비슷하게 나눈 2D가 양 끝보다 훨씬 낫습니다. 비율의 두 항 r/b와 c/d<sub>h</sub>가 같아지는 곳이 최적이기 때문입니다. 두 항이 같으려면 r : c = b : d<sub>h</sub>여야 하니, 기본값(b = 16,384, d<sub>h</sub> = 32,768, 512대)에서는 16 × 32가 가장 좋습니다. 배치를 키우면 최적이 오른쪽(데이터 병렬)으로, 은닉층을 키우면 왼쪽(모델 병렬)으로 밀립니다. 기본값에서 장치당 메모리는 오른쪽 끝이 가장 큽니다. 모든 장치가 파라미터 전체(d<sub>io</sub>d<sub>h</sub>)를 들고 있기 때문입니다.</p>
+<p>부록 B는 같은 이야기를 행렬곱의 <strong>반복 공간</strong>(i, j, k 세 축의 정육면체)으로 설명합니다. 출력 행렬을 나눠 맡는 “owner computes” 방식은 반복 공간을 1D나 2D로만 자를 수 있지만, Mesh-TensorFlow는 텐서를 복제할 수 있어서 세 축을 모두 자르는 3D 분할도 표현합니다. u = v = w, 장치 64대일 때 계산/통신 비율이 2D 분할은 2u/17 ≈ 0.12u, 3D 분할은 u/6 ≈ 0.17u입니다. 정육면체에 가까울수록 표면(통신) 대비 부피(계산)가 큽니다.</p>
+<div class="next"><span class="lbl">다음 질문</span><p>레이아웃을 고르는 법까지 봤습니다. 실제로는 어떻게 쓰고, 어디까지 됐고, 무엇이 남았을까요?</p></div>
+
+<!-- ───────── 11 ───────── -->
+<h2 id="s11">11. 사용법 · 결과 · 한계</h2>
+<p>사용법은 네 단계입니다(발표, 논문 7절). 오픈소스 저장소(<a href="https://github.com/tensorflow/mesh">github.com/tensorflow/mesh</a>)를 받고, 보통의 TensorFlow 그래프처럼 Python으로 그래프를 짜되 이름 붙은 차원을 쓰고, 메시와 그것이 물리 프로세서에 어떻게 대응하는지 정하고, 레이아웃을 정합니다. 그러면 Mesh-TensorFlow가 그 그래프를 TensorFlow 그래프의 일부로 “내려(lower)” 줍니다. 데이터 파이프라인처럼 나머지는 그대로 TensorFlow로 합니다.</p>
+
+<div class="demo">
+  <h4>데모 11 · 분산 방법을 바꿔도 바뀌는 건 두 줄</h4>
+  <p class="cap">논문 8절의 코드 조각입니다. 위쪽 수학 모델은 그대로이고, 아래 두 줄만 바뀝니다. 표는 그 두 줄로 정해지는 장치당 조각 모양입니다(굵은 숫자가 나뉜 차원).</p>
+  <div class="ctrls"><div class="seg" id="d11k"><button data-v="dp" aria-pressed="false">데이터 병렬</button><button data-v="mp" aria-pressed="false">모델 병렬</button><button data-v="dpmp" aria-pressed="true">데이터 + 모델 (2D)</button><button data-v="d3" aria-pressed="false">3D</button></div></div>
+  <pre class="code" id="d11code"></pre>
+  <div class="tw"><table id="d11tab"></table></div>
+</div>
+
+<p><strong>결과.</strong> 최대 50억 파라미터 Transformer를 TPU 포드 전체(512코어)에서 좋은 성능으로 학습했고, 언어 모델링(Billion-Word 퍼플렉시티 23.5)과 기계 번역(WMT14 En-Fr BLEU 43.9, 128코어에서 22시간)에서 당시 최고 기록을 냈습니다(논문 9.1절). 발표 시점에는 수천억 파라미터까지 “돌아가는 것”은 확인했고, 적절한 희소성을 넣으면 1조 파라미터도 학습할 계산량이 된다고 봤습니다.</p>
+<p><strong>한계.</strong> SPMD 코드는 TPU(Cloud TPU 포함)용만 있었고, CPU·GPU에서는 예전 방식인 장치 배치(MIMD) 코드를 만들어서 돌기는 하지만 확장성이 떨어졌습니다. TensorFlow 1에서만 돌았습니다. 가장 큰 한계는 레이아웃을 사람이 골라야 한다는 점입니다. 논문의 향후 과제도 <strong>최적 레이아웃 자동 탐색</strong>, 공간으로 나눈 합성곱에 필요한 halo 영역 통신 같은 연산 추가, CPU/GPU 클러스터용 SPMD입니다.</p>
+<p>이름 붙은 차원과 메시라는 생각은 이후 GSPMD, JAX의 <code>PartitionSpec</code>, PyTorch의 <code>DeviceMesh</code>/<code>DTensor</code>로 이어졌습니다. 같은 시리즈의 <a href="https://dev-jonghoonpark.github.io/how-parallelism-works/#s5">How Parallelism Works 5절</a>은 Mesh-TensorFlow 레이아웃을 데이터·텐서·파이프라인·컨텍스트·전문가 병렬 사이에 놓고 짧게 다루고, 9절에서 Llama 3 405B의 4D 병렬화를 [TP, CP, PP, DP] 네 축짜리 메시로 봅니다. 4절의 Megatron-LM 텐서 병렬(MLP의 A를 열로, B를 행으로 자르고 끝에 all-reduce)은 이 페이지의 h 나누기와 같은 레이아웃입니다. 데이터 병렬의 메모리 문제를 다른 방향(저장만 나누기)에서 푸는 <a href="https://dev-jonghoonpark.github.io/how-fsdp-works/">How FSDP Works</a>, 층으로 자르는 <a href="https://dev-jonghoonpark.github.io/how-gpipe-works/">How GPipe Works</a>도 함께 보면 좋습니다.</p>
+
+<!-- ───────── 12 ───────── -->
+<h2 id="s12">12. 확인 퀴즈</h2>
+<div id="quiz"></div>
+<p class="quiz-score" id="quizScore"></p>
+
+<footer>
+<p><strong>참고 문헌</strong></p>
+<ul class="refs">
+<li>Noam Shazeer (2019), <em>Mesh-TensorFlow: Model Parallelism for Supercomputers</em>, TF Dev Summit '19 — <a href="https://www.youtube.com/watch?v=HgGyWS40g-g" target="_blank" rel="noopener">YouTube</a></li>
+<li>Shazeer, Cheng, Parmar, Tran, Vaswani, Koanantakool, Hawkins, Lee, Hong, Young, Sepassi &amp; Hechtman (2018), <em>Mesh-TensorFlow: Deep Learning for Supercomputers</em>, NeurIPS 2018 — <a href="https://arxiv.org/abs/1811.02084" target="_blank" rel="noopener">arXiv:1811.02084</a></li>
+<li>Mesh-TensorFlow 저장소 — <a href="https://github.com/tensorflow/mesh" target="_blank" rel="noopener">github.com/tensorflow/mesh</a></li>
+<li>Wu 외 (2016), <em>Google's Neural Machine Translation System</em> — <a href="https://arxiv.org/abs/1609.08144" target="_blank" rel="noopener">arXiv:1609.08144</a></li>
+<li>Vaswani 외 (2017), <em>Attention Is All You Need</em> — <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener">arXiv:1706.03762</a></li>
+<li>Xu 외 (2021), <em>GSPMD: General and Scalable Parallelization for ML Computation Graphs</em> — <a href="https://arxiv.org/abs/2105.04663" target="_blank" rel="noopener">arXiv:2105.04663</a></li>
+</ul>
+<p style="margin-top:18px"><a href="https://github.com/dev-jonghoonpark/how-ai-works">how-ai-works</a> 시리즈 · 모든 계산은 브라우저에서 실시간으로 이루어집니다.</p>
+</footer>
+</div>
+<script>
+var $=function(s,r){return (r||document).querySelector(s);};
+var $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s));};
+/* getComputedStyle는 비싸서 테마가 바뀔 때만 다시 읽는다 */
+var cssCache={};
+function css(v){return v in cssCache?cssCache[v]:(cssCache[v]=getComputedStyle(document.documentElement).getPropertyValue(v).trim());}
+/* 캔버스: 논리 높이는 data-h에 두고, dpr은 2로 제한, 크기가 같으면 버퍼를 재사용한다 */
+function setup(cv){
+  if(!cv.dataset.h)cv.dataset.h=cv.getAttribute('height');
+  var dpr=Math.min(2,window.devicePixelRatio||1),w=cv.clientWidth,h=+cv.dataset.h;
+  var bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;}
+  if(cv.style.height!==h+'px')cv.style.height=h+'px';
+  var c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);
+  return {c:c,w:w,h:h};
+}
+function onFrame(fn){var q=false;return function(){if(q)return;q=true;requestAnimationFrame(function(){q=false;fn();});};}
+function hexA(hex,a){var n=parseInt(hex.slice(1),16);return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')';}
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;var t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function fmt(x,d){return (+x).toFixed(d==null?2:d);}
+function fmtInt(n){return Math.round(n).toLocaleString('en-US');}
+function cl(x,a,b){return Math.max(a,Math.min(b,x));}
+function font(c,sz,w){c.font=(w||'')+' '+sz+'px system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif';}
+function big(n){return n>=1e12?fmt(n/1e12,2)+'T':n>=1e9?fmt(n/1e9,2)+'B':n>=1e6?fmt(n/1e6,1)+'M':n>=1e4?fmt(n/1e3,1)+'K':fmtInt(n);}
+function segInit(el,fn){el.addEventListener('click',function(e){var b=e.target.closest('button');if(!b||!el.contains(b))return;
+  $$('button',el).forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});fn(b.dataset.v);});}
+function segVal(el){var b=$('button[aria-pressed=true]',el);return b?b.dataset.v:null;}
+function segSet(el,v){$$('button',el).forEach(function(x){x.setAttribute('aria-pressed',x.dataset.v===String(v)?'true':'false');});}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
+/* ENGINE-START ══════ 장난감 Mesh-TensorFlow: 이름 붙은 차원 · 메시 · 레이아웃 · SPMD einsum ══════ */
+function prod(a){var p=1;for(var i=0;i<a.length;i++)p*=a[i];return p;}
+function strides(s){var r=new Array(s.length),a=1;for(var i=s.length-1;i>=0;i--){r[i]=a;a*=s[i];}return r;}
+function mkT(dims,sizes,data){return {dims:dims.slice(),sizes:sizes.slice(),data:data||new Float64Array(prod(sizes))};}
+function sizeMap(ts){var m={};ts.forEach(function(t){t.dims.forEach(function(d,i){m[d]=t.sizes[i];});});return m;}
+/* einsum: 입력들의 차원 합집합을 모두 돌며 곱하고, out에 없는 차원은 더해 없앤다(논문 6절의 정의 그대로) */
+function einsum(ins,out){
+  var U=[];ins.forEach(function(t){t.dims.forEach(function(d){if(U.indexOf(d)<0)U.push(d);});});
+  var sm=sizeMap(ins),us=U.map(function(d){return sm[d];}),os=out.map(function(d){return sm[d];});
+  var C=mkT(out,os),sc=strides(os);
+  var st=ins.map(function(t){var s=strides(t.sizes);return U.map(function(d){var i=t.dims.indexOf(d);return i<0?0:s[i];});});
+  var so=U.map(function(d){var i=out.indexOf(d);return i<0?0:sc[i];});
+  var n=prod(us),ix=new Array(U.length).fill(0),off=ins.map(function(){return 0;}),oo=0,a,j;
+  for(var k=0;k<n;k++){
+    var v=1;for(a=0;a<ins.length;a++)v*=ins[a].data[off[a]];
+    C.data[oo]+=v;
+    for(j=U.length-1;j>=0;j--){
+      ix[j]++;for(a=0;a<ins.length;a++)off[a]+=st[a][j];oo+=so[j];
+      if(ix[j]<us[j])break;
+      for(a=0;a<ins.length;a++)off[a]-=st[a][j]*us[j];oo-=so[j]*us[j];ix[j]=0;
+    }
+  }
+  return {t:C,mults:n};
+}
+/* 원소별 연산. B의 차원은 A 차원의 부분집합(브로드캐스트) */
+function ewise(A,B,f){
+  var C=mkT(A.dims,A.sizes),i,j;
+  if(!B){for(i=0;i<A.data.length;i++)C.data[i]=f(A.data[i]);return C;}
+  var sa=strides(A.sizes),sb=strides(B.sizes),map=A.dims.map(function(d){var k=B.dims.indexOf(d);return k<0?0:sb[k];});
+  for(i=0;i<A.data.length;i++){var r=i,o=0;for(j=0;j<A.dims.length;j++){var q=Math.floor(r/sa[j]);r-=q*sa[j];o+=q*map[j];}C.data[i]=f(A.data[i],B.data[o]);}
+  return C;
+}
+function mkMesh(names,sizes){var st=strides(sizes);return {names:names.slice(),sizes:sizes.slice(),n:prod(sizes),
+  coord:function(r){return sizes.map(function(s,i){return Math.floor(r/st[i])%s;});}};}
+function meshSize(mesh,m){var i=mesh.names.indexOf(m);return i<0?1:mesh.sizes[i];}
+/* 전역 레이아웃 중 이 메시에 있는 축만 남긴다 */
+function cleanLayout(layout,mesh){var o={};Object.keys(layout).forEach(function(d){if(layout[d]&&mesh.names.indexOf(layout[d])>=0)o[d]=layout[d];});return o;}
+/* 텐서 하나의 레이아웃 = 전역 레이아웃을 그 텐서의 차원으로 제한한 것. 같은 메시 축이 두 번 나오면 금지(5절) */
+function checkLegal(dims,layout){var seen={};for(var i=0;i<dims.length;i++){var m=layout[dims[i]];if(!m)continue;if(seen[m])return [seen[m],dims[i],m];seen[m]=dims[i];}return null;}
+function sliceOf(T,layout,mesh,rank){
+  var c=mesh.coord(rank),lo=[],len=[];
+  T.dims.forEach(function(d,i){var m=layout[d],mi=mesh.names.indexOf(m),k=mi<0?1:mesh.sizes[mi],L=T.sizes[i]/k;lo.push(mi<0?0:c[mi]*L);len.push(L);});
+  var S=mkT(T.dims,len),ss=strides(len),ts=strides(T.sizes);
+  for(var i=0;i<S.data.length;i++){var r=i,o=0;for(var j=0;j<len.length;j++){var q=Math.floor(r/ss[j]);r-=q*ss[j];o+=(q+lo[j])*ts[j];}S.data[i]=T.data[o];}
+  return S;
+}
+function distribute(T,layout,mesh){var a=[];for(var r=0;r<mesh.n;r++)a.push(sliceOf(T,layout,mesh,r));return a;}
+/* 메시 축 집합 axes를 따라 묶이는 그룹 = axes 밖의 좌표가 모두 같은 장치들 */
+function groups(mesh,axes){var g={},order=[];for(var r=0;r<mesh.n;r++){var c=mesh.coord(r);
+  var key=mesh.names.map(function(nm,i){return axes.indexOf(nm)>=0?'*':c[i];}).join(',');
+  if(!g[key]){g[key]=[];order.push(key);}g[key].push(r);}return order.map(function(k){return g[k];});}
+/* 분산 einsum: 장치마다 자기 조각으로 einsum → 더해 없앤 차원이 나뉜 메시 축을 따라 all-reduce */
+function dOp(ctx,key,name,ins,out){
+  var mesh=ctx.mesh,lay=ctx.layout,res=[],mults=0,r;
+  for(r=0;r<mesh.n;r++){var e=einsum(ins.map(function(D){return D[r];}),out);res.push(e.t);mults=e.mults;}
+  var U=[];ins.forEach(function(D){D[0].dims.forEach(function(d){if(U.indexOf(d)<0)U.push(d);});});
+  var red=U.filter(function(d){return out.indexOf(d)<0;});
+  var axes=[];red.forEach(function(d){var m=lay[d];if(m&&axes.indexOf(m)<0)axes.push(m);});
+  var info={key:key,name:name,red:red,axes:axes,values:0,groups:null,mults:mults,pre:res.map(function(t){return mkT(t.dims,t.sizes,Float64Array.from(t.data));})};
+  if(axes.length){
+    var gs=groups(mesh,axes);info.groups=gs;info.values=res[0].data.length;
+    gs.forEach(function(g){var s=new Float64Array(res[g[0]].data.length);
+      g.forEach(function(q){var d=res[q].data;for(var i=0;i<s.length;i++)s[i]+=d[i];});
+      g.forEach(function(q){res[q]=mkT(out,res[q].sizes,Float64Array.from(s));});});
+  }
+  ctx.log.push(info);ctx.mults+=mults;ctx.out[key]=res;
+  return res;
+}
+function dEw(A,B,f){return A.map(function(a,r){return ewise(a,B?B[r]:null,f);});}
+/* 장치별 조각을 모아 전체 텐서를 만든다. 같은 칸을 가진 복제본끼리 값이 다르면 그 차이를 repErr로 */
+function gather(D,dims,sizes,layout,mesh){
+  var T=mkT(dims,sizes),seen=new Uint8Array(T.data.length),err=0,ts=strides(sizes);
+  for(var r=0;r<mesh.n;r++){var c=mesh.coord(r),S=D[r],ss=strides(S.sizes);
+    var lo=dims.map(function(d,i){var mi=mesh.names.indexOf(layout[d]);return mi<0?0:c[mi]*S.sizes[i];});
+    for(var i=0;i<S.data.length;i++){var rem=i,o=0;for(var j=0;j<ss.length;j++){var q=Math.floor(rem/ss[j]);rem-=q*ss[j];o+=(q+lo[j])*ts[j];}
+      if(seen[o])err=Math.max(err,Math.abs(T.data[o]-S.data[i]));else{T.data[o]=S.data[i];seen[o]=1;}}}
+  return {t:T,repErr:err};
+}
+/* 논문 8절의 두 층짜리 예제: y = Relu(x w + bias) v, 그리고 역전파 */
+var MLP_DIMS={batch:8,io:4,hidden:8};
+var MLP_SHAPES={x:['batch','io'],w:['io','hidden'],bias:['hidden'],h:['batch','hidden'],v:['hidden','io'],y:['batch','io'],t:['batch','io'],
+  xw:['batch','hidden'],dy:['batch','io'],dv:['hidden','io'],dh:['batch','hidden'],dpre:['batch','hidden'],dw:['io','hidden'],dbias:['hidden'],dx:['batch','io']};
+function mlpData(seed){
+  var r=rng(seed);
+  function T(dims,lo,hi){var t=mkT(dims,dims.map(function(d){return MLP_DIMS[d];}));for(var i=0;i<t.data.length;i++)t.data[i]=lo+Math.floor(r()*(hi-lo+1));return t;}
+  return {x:T(MLP_SHAPES.x,-2,2),w:T(MLP_SHAPES.w,-1,1),bias:T(MLP_SHAPES.bias,-1,1),v:T(MLP_SHAPES.v,-1,1),t:T(MLP_SHAPES.t,-2,2)};
+}
+function runMLP(D,mesh,layout){
+  var ctx={mesh:mesh,layout:layout,log:[],mults:0,out:{}};
+  var X=distribute(D.x,layout,mesh),W=distribute(D.w,layout,mesh),B=distribute(D.bias,layout,mesh),V=distribute(D.v,layout,mesh),Tg=distribute(D.t,layout,mesh);
+  var pre=dOp(ctx,'xw','xw = einsum(x, w)',[X,W],MLP_SHAPES.xw);
+  var pre2=dEw(pre,B,function(a,b){return a+b;});
+  var H=dEw(pre2,null,function(a){return a>0?a:0;});
+  var Y=dOp(ctx,'y','y = einsum(h, v)',[H,V],MLP_SHAPES.y);
+  var dY=dEw(Y,Tg,function(a,b){return a-b;});           /* 손실 ½‖y − t‖² */
+  dOp(ctx,'dv','dv = einsum(h, dy)',[H,dY],MLP_SHAPES.dv);
+  var dH=dOp(ctx,'dh','dh = einsum(dy, v)',[dY,V],MLP_SHAPES.dh);
+  var dP=dH.map(function(a,r){return ewise(a,pre2[r],function(g,p){return p>0?g:0;});});
+  dOp(ctx,'dw','dw = einsum(x, dpre)',[X,dP],MLP_SHAPES.dw);
+  dOp(ctx,'dbias','dbias = reduce_sum(dpre)',[dP],MLP_SHAPES.dbias);
+  dOp(ctx,'dx','dx = einsum(dpre, w)',[dP,W],MLP_SHAPES.dx);
+  ctx.held={x:X,w:W,bias:B,h:H,v:V,y:Y};
+  return ctx;
+}
+function mlpCheck(D,mesh,layout,ref){
+  var ctx=runMLP(D,mesh,layout),maxErr=0,rep=0;
+  ['xw','y','dv','dh','dw','dbias','dx'].forEach(function(k){
+    var g=gather(ctx.out[k],MLP_SHAPES[k],MLP_SHAPES[k].map(function(d){return MLP_DIMS[d];}),layout,mesh),R=ref.out[k][0];
+    rep=Math.max(rep,g.repErr);for(var i=0;i<R.data.length;i++)maxErr=Math.max(maxErr,Math.abs(R.data[i]-g.t.data[i]));});
+  var comm=ctx.log.reduce(function(s,l){return s+l.values;},0);
+  return {ctx:ctx,maxErr:maxErr,repErr:rep,comm:comm};
+}
+/* 논문 표 2 (Transformer 언어 모델, d_model = 1024, d_k = d_v = 256) */
+var T2=[[4096,4,0.14,35.0,8.74],[8192,8,0.22,31.7,8.03],[16384,16,0.37,28.9,7.44],[32768,32,0.67,26.8,6.99],[65536,64,1.28,25.1,6.55],[131072,128,2.48,24.1,6.24],[262144,256,4.90,24.0,6.01]];
+var T3=[[2048,4,0.15,25.5,41.8],[4096,8,0.24,26.5,42.5],[8192,16,0.42,27.1,43.3],[16384,32,0.77,27.5,43.5],[32768,64,1.48,27.5,43.8],[65536,128,2.89,26.7,43.9]];
+/* 논문은 층 수와 어휘 크기를 적지 않았다. 층 6개 + 층 밖 파라미터 6,740만 개로 두면 표 2의 7개 행이 ±0.01B 안에서 맞는다 */
+var TF={dm:1024,dk:256,L:6,E:67.4e6,B:256,len:256};
+function tfParams(f,h){return TF.L*(4*TF.dm*h*TF.dk+2*TF.dm*f)+TF.E;}
+function tfCost(f,h,r,c){
+  var N=tfParams(f,h),tok=TF.B*TF.len/r;
+  var flops=(6*N*TF.B*TF.len+12*TF.L*TF.B*TF.len*TF.len*h*TF.dk)/(r*c);
+  var colComm=c>1?(6*TF.L+2)*(TF.B/r)*TF.len*TF.dm:0;     /* 층마다 순전파 2 + 역전파 4, 어휘 2 */
+  var rowComm=r>1?N/c:0;                                   /* 파라미터 기울기 */
+  var ok=(h%c===0)&&(f%c===0)&&(TF.B%r===0);
+  return {N:N,perDev:N/c,tok:tok,flops:flops,colComm:colComm,rowComm:rowComm,comm:colComm+rowComm,ratio:(colComm+rowComm)/flops,ok:ok};
+}
+/* 논문 표 1: 두 층 예제의 레이아웃별 통신/계산 비율과 장치당 메모리 (상수·저차항 생략) */
+function t1Cost(b,dio,dh,r,c,p){
+  p=p||1;
+  var ratio=(c>1?c/dh:0)+(r>1?r/b:0)+(p>1?p/dio:0);
+  var mem=(b/r)*(dio/p)+(b/r)*(dh/c)+(dio/p)*(dh/c);
+  var comm=(c>1?(b/r)*(dio/p):0)+(r>1?(dio/p)*(dh/c):0)+(p>1?(b/r)*(dh/c):0);
+  return {ratio:ratio,mem:mem,comm:comm,comp:b*dio*dh/(r*c*p)};
+}
+/* ENGINE-END */
+
+function compactRanks(rs,n){
+  if(rs.length===n&&n>2)return '전체';
+  var out=[],i=0;while(i<rs.length){var j=i;while(j+1<rs.length&&rs[j+1]===rs[j]+1)j++;
+    out.push(j-i>=2?rs[i]+'–'+rs[j]:(j>i?rs[i]+','+rs[j]:''+rs[i]));i=j+1;}
+  return out.join(',');
+}
+/* 2차원 텐서 하나를 블록(레이아웃에 따른 조각) 단위로 그린다. 블록에는 그 조각을 가진 장치 번호를 적는다 */
+function drawTensor(c,o){
+  var mesh=o.mesh,lay=o.lay,mR=mesh.names.indexOf(lay[o.dims[0]]),mC=o.dims[1]?mesh.names.indexOf(lay[o.dims[1]]):-1;
+  var nR=o.sizes[0],nC=o.sizes[1]||1,kR=mR<0?1:mesh.sizes[mR],kC=mC<0?1:mesh.sizes[mC];
+  var cs=o.cs,W=nC*cs,H=nR*cs,bw=W/kC,bh=H/kR,i,j;
+  for(i=0;i<kR;i++)for(j=0;j<kC;j++){
+    var own=[];for(var r=0;r<mesh.n;r++){var cd=mesh.coord(r);if((mR<0||cd[mR]===i)&&(mC<0||cd[mC]===j))own.push(r);}
+    var mine=o.bad?false:own.indexOf(o.sel)>=0,x=o.x+j*bw,y=o.y+i*bh;
+    c.fillStyle=o.bad?hexA(css('--s8'),0.10):mine?hexA(css('--s1'),0.62):hexA(css('--axis'),0.28);
+    c.fillRect(x,y,bw,bh);
+    if(!o.bad){font(c,Math.max(9.5,Math.min(12,cs*0.62)),'600');var s=compactRanks(own,mesh.n),tw=c.measureText(s).width;
+      if(tw<bw-3&&bh>=11){c.fillStyle=mine?'#fff':css('--text-secondary');c.textAlign='center';c.textBaseline='middle';c.fillText(s,x+bw/2,y+bh/2);}}
+  }
+  c.strokeStyle=hexA(css('--axis'),0.55);c.lineWidth=0.5;c.beginPath();
+  for(i=1;i<nR;i++){c.moveTo(o.x,o.y+i*cs);c.lineTo(o.x+W,o.y+i*cs);}
+  for(j=1;j<nC;j++){c.moveTo(o.x+j*cs,o.y);c.lineTo(o.x+j*cs,o.y+H);}c.stroke();
+  c.strokeStyle=o.bad?css('--s8'):css('--text-secondary');c.lineWidth=o.bad?2:1.2;c.beginPath();
+  for(i=0;i<=kR;i++){c.moveTo(o.x,o.y+i*bh);c.lineTo(o.x+W,o.y+i*bh);}
+  for(j=0;j<=kC;j++){c.moveTo(o.x+j*bw,o.y);c.lineTo(o.x+j*bw,o.y+H);}c.stroke();
+  if(o.label){font(c,11.5,'650');c.fillStyle=o.bad?css('--s8'):css('--text-primary');c.textAlign=o.align||'left';c.textBaseline='alphabetic';
+    c.fillText(o.label,o.align==='right'?o.x+W:o.x,o.ly);}
+}
+function matHTML(T,cls){
+  var R=T.sizes[0],C=T.sizes.length>1?T.sizes[1]:1,h='<table class="mat '+(cls||'')+'">';
+  for(var i=0;i<R;i++){h+='<tr>';for(var j=0;j<C;j++){var v=T.data[i*C+j];h+='<td class="'+(v>0?'p':v<0?'n':'')+'">'+fmt(v,0)+'</td>';}h+='</tr>';}
+  return h+'</table>';
+}
+
+/* ══════ 데모 1 · 데이터 병렬의 두 벽 ══════ */
+var D1N=[1e8,3e8,1e9,2e9,5e9,1e10,2e10,1e11,1e12];
+function d1N(){return D1N[+$('#d1n').value];}
+function drawD1(){
+  var N=d1N(),k=+$('#d1k').value,n=Math.pow(2,k),b=Math.pow(2,+$('#d1b').value),cap=+$('#d1m').value;
+  $('#d1nv').textContent=big(N)+' 파라미터';$('#d1kv').textContent=fmtInt(n)+'대';$('#d1bv').textContent=fmtInt(b)+'개';$('#d1mv').textContent=cap+' GB';
+  var cv=$('#d1cv'),narrow=cv.clientWidth<560;cv.dataset.h=narrow?440:230;
+  var S=setup(cv),c=S.c,pw=narrow?S.w:(S.w-24)/2,ph=narrow?200:S.h,L=46,B=34,T=22;
+  var mem=N*16/1e9;
+  function panel(ox,oy,title,ys,ymin,ymax,yl,line,mark){
+    font(c,12.5,'650');c.fillStyle=css('--text-primary');c.textAlign='left';c.fillText(title,ox+4,oy+14);
+    var X=function(kk){return ox+L+(pw-L-12)*kk/10;},Y=function(v){return oy+T+(ph-T-B)*(1-(Math.log10(v)-ymin)/(ymax-ymin));};
+    c.strokeStyle=css('--grid');c.lineWidth=1;font(c,10.5);c.fillStyle=css('--muted');
+    for(var e=Math.ceil(ymin);e<=ymax;e++){var yy=Y(Math.pow(10,e));c.beginPath();c.moveTo(ox+L,yy);c.lineTo(ox+pw-12,yy);c.stroke();c.textAlign='right';c.fillText(yl(Math.pow(10,e)),ox+L-5,yy+3);}
+    c.textAlign='center';for(var q=0;q<=10;q+=2){c.fillText(fmtInt(Math.pow(2,q)),X(q),oy+ph-B+15);}
+    c.fillText('장치 수 n',ox+L+(pw-L)/2,oy+ph-4);
+    if(line){c.setLineDash([5,4]);c.strokeStyle=css('--s8');c.beginPath();c.moveTo(ox+L,Y(line));c.lineTo(ox+pw-12,Y(line));c.stroke();c.setLineDash([]);}
+    c.strokeStyle=css('--s1');c.lineWidth=2.2;c.beginPath();
+    for(var kk=0;kk<=10;kk++){var v=cl(ys(Math.pow(2,kk)),Math.pow(10,ymin),Math.pow(10,ymax));kk?c.lineTo(X(kk),Y(v)):c.moveTo(X(kk),Y(v));}c.stroke();
+    var mv=cl(ys(n),Math.pow(10,ymin),Math.pow(10,ymax));c.fillStyle=mark?css('--s8'):css('--s1');c.beginPath();c.arc(X(k),Y(mv),5,0,7);c.fill();
+  }
+  var gmin=Math.floor(Math.log10(Math.min(mem,cap)))-1,gmax=Math.ceil(Math.log10(Math.max(mem,cap)))+1;
+  panel(0,0,'장치당 메모리 (GB)',function(){return mem;},gmin,gmax,function(v){return v>=1?fmtInt(v):fmt(v,1);},cap,mem>cap);
+  panel(narrow?0:pw+24,narrow?ph+30:0,'통신 / 계산 ∝ n / b',function(nn){return nn/b;},-4,1,function(v){return v>=1?fmtInt(v):String(v);},1,n/b>=1);
+  $('#d1out').innerHTML='<span>장치당 파라미터<b>'+big(N)+'</b></span><span>장치당 메모리(16바이트/파라미터)<b style="color:'+(mem>cap?'var(--s8)':'inherit')+'">'+(mem>=10?fmtInt(mem):fmt(mem,1))+' GB</b></span>'+
+   '<span>장치당 배치 b/n<b style="color:'+(b<n?'var(--s8)':'inherit')+'">'+(b>=n?fmtInt(b/n):'1개도 안 됨')+'</b></span><span>통신/계산 비율 n/b<b>'+(n/b<0.01?(n/b).toExponential(1):fmt(n/b,3))+'</b></span>';
+}
+
+/* ══════ 데모 2 · 표 2·3과 부록 C 샘플 ══════ */
+var SAMPLES=[
+ [0,'0.14B','35.0',['… , the head of PMI , he has now written off all his employees fairly .','… , director of the Economic Policy Institute , India ranks 21st out of 221 nations in the current budget deficit , which ranks 13th globally .']],
+ [2,'0.37B','28.9',['… , chief executive of the company , very few people work through chronology , and most people can ’t use tables on their machines .','… , we are saving the most jobs in the world .']],
+ [4,'1.28B','25.1',['… of UNK , a software company in California , computer games are alive and well , with millions of gamers , but most games do not make money .','… , creator of the Review of Medical UNK , the organisation could be the " holy grail " of degenerative brain disease .']],
+ [6,'4.9B','24.0',['… , the futurist son of the futurist who wrote The Singularity is Near , the " early days " of Google are not the right time to push forward with the next great leap .','… , the expert and co-author of " The Singularity is Near : Comprehending the Technological Future of Engineering , " people are looking for ways to protect and make their lives better .']]
+];
+var d2task='lm';
+function drawD2(){
+  var si=+$('#d2s').value,smp=SAMPLES[si];
+  var rows=d2task==='lm'?T2:T3,yi=d2task==='lm'?3:4,yl=d2task==='lm'?'단어 퍼플렉시티 (낮을수록 좋음)':'WMT14 En-Fr BLEU (높을수록 좋음)';
+  var S=setup($('#d2cv')),c=S.c,L=46,R=14,T=24,B=36,W=S.w,H=S.h;
+  var ys=rows.map(function(r){return r[yi];}),ymin=Math.floor(Math.min.apply(null,ys)-1),ymax=Math.ceil(Math.max.apply(null,ys)+1);
+  var X=function(p){return L+(W-L-R)*(Math.log10(p)-Math.log10(0.1))/(Math.log10(6)-Math.log10(0.1));},Y=function(v){return T+(H-T-B)*(1-(v-ymin)/(ymax-ymin));};
+  font(c,12.5,'650');c.fillStyle=css('--text-primary');c.textAlign='left';c.fillText(yl,4,14);
+  font(c,10.5);c.fillStyle=css('--muted');c.strokeStyle=css('--grid');c.lineWidth=1;
+  var step=(ymax-ymin)>8?2:1;
+  for(var v=ymin;v<=ymax;v+=step){c.beginPath();c.moveTo(L,Y(v));c.lineTo(W-R,Y(v));c.stroke();c.textAlign='right';c.fillText(v,L-5,Y(v)+3);}
+  c.textAlign='center';[0.1,0.2,0.5,1,2,5].forEach(function(p){c.fillText(p+'B',X(p),H-B+15);});c.fillText('파라미터 수 (로그 축)',L+(W-L)/2,H-4);
+  if(d2task==='lm'){c.setLineDash([5,4]);c.strokeStyle=css('--s8');c.beginPath();c.moveTo(L,Y(28.0));c.lineTo(W-R,Y(28.0));c.stroke();c.setLineDash([]);
+    font(c,10.5);c.fillStyle=css('--s8');c.textAlign='right';c.fillText('이전 최고 단일 DNN 28.0 (6.5B)',W-R-4,Y(28.0)-5);}
+  c.strokeStyle=css('--s1');c.lineWidth=2;c.beginPath();rows.forEach(function(r,i){i?c.lineTo(X(r[2]),Y(r[yi])):c.moveTo(X(r[2]),Y(r[yi]));});c.stroke();
+  rows.forEach(function(r,i){var hl=d2task==='lm'&&i===smp[0];c.fillStyle=hl?css('--s2'):css('--s1');c.beginPath();c.arc(X(r[2]),Y(r[yi]),hl?7:4,0,7);c.fill();
+    font(c,10.5,'600');c.fillStyle=css('--text-secondary');c.textAlign='center';c.fillText(fmt(r[yi],1),X(r[2]),Y(r[yi])+(d2task==='lm'?-10:16));});
+  $('#d2sv').textContent=smp[1]+' · PPL '+smp[2];
+  $('#d2txt').innerHTML='<p class="mini" style="margin:0 0 6px">“According to Ray Kurzweil …”로 시작해 '+smp[1]+' 모델이 이어 쓴 문장 (부록 C)</p>'+smp[3].map(function(s){return '<p class="smp">'+esc(s)+'</p>';}).join('');
+}
+
+/* ══════ 데모 3 · 장치 배치(GNMT식) 파이프라인 ══════ */
+var d3mode='seq';
+function drawD3(){
+  var T=+$('#d3t').value,n=Math.pow(2,+$('#d3n').value),Ld=9;
+  $('#d3tv').textContent=T+'개';$('#d3nv').textContent=fmtInt(n)+'대';
+  var total=d3mode==='seq'?Ld*T:T+Ld-1,util=Ld*T/(Ld*total);
+  var S=setup($('#d3cv')),c=S.c,L=100,R=8,Tp=6,B=24,W=S.w,H=S.h,rh=(H-Tp-B)/Ld,cw=(W-L-R)/(Ld*T);
+  font(c,10.5);
+  for(var l=0;l<Ld;l++){var y=Tp+l*rh;c.fillStyle=css('--text-secondary');c.textAlign='right';c.textBaseline='middle';
+    c.fillText(l<8?'GPU '+l+' · LSTM '+(l+1):'softmax',L-6,y+rh/2);
+    c.fillStyle=hexA(css('--axis'),0.18);c.fillRect(L,y+1,W-L-R,rh-2);
+    for(var t=0;t<T;t++){var s=d3mode==='seq'?l*T+t:l+t;c.fillStyle=l<8?hexA(css('--s1'),0.35+0.6*t/T):hexA(css('--s2'),0.35+0.6*t/T);c.fillRect(L+s*cw+0.5,y+2,Math.max(1,cw-1),rh-4);}
+  }
+  c.textBaseline='alphabetic';c.strokeStyle=css('--s8');c.setLineDash([4,3]);c.beginPath();c.moveTo(L+total*cw,Tp);c.lineTo(L+total*cw,H-B+4);c.stroke();c.setLineDash([]);
+  c.fillStyle=css('--muted');c.textAlign='center';c.fillText('시간 → (한 칸 = 한 토큰을 한 층에 통과시키는 시간)',L+(W-L)/2,H-6);
+  $('#d3out').innerHTML='<span>걸린 시간<b>'+total+'칸</b></span><span>GPU 활용률<b>'+fmt(util*100,0)+'%</b></span>'+
+   '<span>장치 배치 그래프의 연산 수<b>'+fmtInt(1000*n)+'</b></span><span>SPMD 프로그램의 연산 수<b>1,000</b></span>';
+}
+
+/* ══════ 데모 4 · batch를 나누면 어디서 통신이 생기나 ══════ */
+var D4X=(function(){var r=rng(7),t=mkT(['batch','d'],[8,3]);for(var i=0;i<24;i++)t.data[i]=1+Math.floor(r()*9);return t;})();
+var d4n=2,d4red='batch';
+function drawD4(){
+  var mesh=mkMesh(['all'],[d4n]),lay={batch:'all'},X=distribute(D4X,lay,mesh);
+  var ctx={mesh:mesh,layout:lay,log:[],mults:0,out:{}};
+  var out=d4red==='batch'?['d']:['batch'];
+  var Rz=dOp(ctx,'s','reduce_sum',[X],out),info=ctx.log[0];
+  var html='';
+  for(var r=0;r<d4n;r++){
+    var pre=info.pre[r];
+    html+='<div class="dev"><div class="dh">장치 '+r+' · 가진 조각 [batch '+X[r].sizes[0]+', d 3]</div>'+matHTML(X[r])+
+      '<div class="dh">자기 조각만 더한 값</div>'+matHTML(d4red==='batch'?pre:mkT(['batch','one'],[pre.sizes[0],1],pre.data),'sm')+
+      (info.axes.length?'<div class="dh" style="color:var(--s8)">all-reduce 뒤</div>'+matHTML(Rz[r],'sm'):'<div class="dh" style="color:var(--s3)">통신 없음 — 이미 정답 조각</div>')+'</div>';
+  }
+  $('#d4devs').innerHTML=html;
+  var full=einsum([D4X],out).t;
+  $('#d4out').innerHTML=d4red==='batch'?
+    (d4n>1?'<b>batch</b>는 메시 축 <code>all</code>에 나뉘어 있습니다. 장치마다 자기 몫 '+(8/d4n)+'개 행만 더했으니 부분합이고, 장치 '+d4n+'대의 부분합을 더하는 all-reduce가 필요합니다(장치당 3개 값). 결과 ['+Array.from(full.data).join(', ')+']는 모든 장치에 복제됩니다.':'장치가 1대면 나눌 것이 없어 통신도 없습니다.'):
+    '<b>d</b>는 나뉘어 있지 않습니다. 장치마다 자기 행의 d를 끝까지 더할 수 있으니 결과도 batch를 따라 나뉜 채 끝납니다. <b>통신 0</b>.';
+}
+
+/* ══════ 데모 5 · 물리 장치 8개를 여러 메시로 보기 ══════ */
+var MESH_DEF={'[1]':[['all'],[1]],'[2]':[['all'],[2]],'[4]':[['all'],[4]],'[8]':[['all'],[8]],'[2,2]':[['rows','cols'],[2,2]],'[2,4]':[['rows','cols'],[2,4]],'[4,2]':[['rows','cols'],[4,2]],'[2,2,2]':[['rows','cols','planes'],[2,2,2]]};
+function getMesh(k){var d=MESH_DEF[k];return mkMesh(d[0],d[1]);}
+var d5={mesh:'[2,4]',sel:5,lay:{batch:'rows',hidden:'cols'}};
+function fillSel(sel,mesh,val){sel.innerHTML='<option value="">나누지 않음</option>'+mesh.names.map(function(m){return '<option value="'+m+'"'+(m===val?' selected':'')+'>'+m+' ('+meshSize(mesh,m)+')</option>';}).join('');}
+function drawD5(){
+  var mesh=getMesh(d5.mesh);d5.lay=cleanLayout(d5.lay,mesh);
+  fillSel($('#d5b'),mesh,d5.lay.batch);fillSel($('#d5h'),mesh,d5.lay.hidden);
+  var cv=$('#d5cv'),narrow=cv.clientWidth<600;cv.dataset.h=narrow?470:250;
+  var S=setup(cv),c=S.c,AX=['--s2','--s3','--s4'];
+  /* 왼쪽: 물리 보드 2 × 4 (랭크 = 물리 위치의 행 우선 번호) */
+  var bwid=narrow?S.w:S.w*0.46,cw=Math.min(78,(bwid-10)/4),chh=Math.min(70,cw*0.86),ox=4,oy=26;
+  font(c,12.5,'650');c.fillStyle=css('--text-primary');c.textAlign='left';c.fillText('물리 장치 2 × 4 (번호 = 랭크)',ox,16);
+  var sc=mesh.coord(d5.sel);
+  for(var r=0;r<8;r++){var pr=Math.floor(r/4),pc=r%4,x=ox+pc*cw,y=oy+pr*(chh+8),cd=mesh.coord(r),me=r===d5.sel;
+    c.fillStyle=me?hexA(css('--s1'),0.85):hexA(css('--axis'),0.25);c.fillRect(x+3,y+3,cw-6,chh-6);
+    mesh.names.forEach(function(nm,ai){var same=mesh.names.every(function(n2,bj){return bj===ai||cd[bj]===sc[bj];});
+      if(same&&!me&&mesh.sizes[ai]>1){c.strokeStyle=css(AX[ai]);c.lineWidth=3;c.strokeRect(x+3+ai*3,y+3+ai*3,cw-6-ai*6,chh-6-ai*6);}});
+    font(c,15,'700');c.fillStyle=me?'#fff':css('--text-primary');c.textAlign='center';c.fillText(r,x+cw/2,y+chh/2-2);
+    font(c,10.5);c.fillStyle=me?'#fff':css('--text-secondary');c.fillText('('+cd.join(',')+')',x+cw/2,y+chh/2+14);}
+  var ly=oy+2*(chh+8)+12;font(c,11);c.textAlign='left';
+  mesh.names.forEach(function(nm,ai){if(mesh.sizes[ai]<2)return;c.fillStyle=css(AX[ai]);c.fillRect(ox,ly-8,14,4);c.fillStyle=css('--text-secondary');
+    c.fillText(nm+' 축 그룹 (all-reduce를 '+nm+'로 하면 같이 묶이는 장치)',ox+20,ly-3);ly+=16;});
+  /* 오른쪽: X[batch, hidden] 블록 */
+  var bad=checkLegal(['batch','hidden'],d5.lay),tx=narrow?4:S.w*0.52,ty=narrow?ly+22:26,cs=Math.min(24,((narrow?S.w:S.w*0.46)-10)/8);
+  font(c,12.5,'650');c.fillStyle=css('--text-primary');c.textAlign='left';c.fillText('X [batch 8, hidden 8] — 칸의 숫자 = 그 조각을 가진 장치',tx,ty-10);
+  if(narrow&&c.measureText('X [batch 8, hidden 8] — 칸의 숫자 = 그 조각을 가진 장치').width>S.w-8){c.clearRect(tx,ty-24,S.w,18);c.fillText('X [batch 8, hidden 8]',tx,ty-10);}
+  drawTensor(c,{x:tx,y:ty,cs:cs,dims:['batch','hidden'],sizes:[8,8],lay:d5.lay,mesh:mesh,sel:d5.sel,bad:!!bad});
+  var lb=mesh.names.indexOf(d5.lay.batch),lh=mesh.names.indexOf(d5.lay.hidden),shape='['+(8/(lb<0?1:mesh.sizes[lb]))+', '+(8/(lh<0?1:mesh.sizes[lh]))+']';
+  var cp=0;for(var q=0;q<mesh.n;q++){var cq=mesh.coord(q);if(mesh.names.every(function(nm,i){var used=d5.lay.batch===nm||d5.lay.hidden===nm;return used?cq[i]===sc[i]:true;}))cp++;}
+  $('#d5out').innerHTML=bad?'<span class="bad">금지: <b>batch</b>와 <b>hidden</b>이 둘 다 메시 축 <code>'+bad[2]+'</code>에 매핑되었습니다. 텐서 하나의 두 차원을 같은 메시 축으로 나눌 수 없습니다(논문 5절).</span>':
+   '장치 <b>'+d5.sel+'</b>의 메시 좌표 <b>('+mesh.names.map(function(nm,i){return nm+'='+sc[i];}).join(', ')+')</b> · 가진 조각 <b>'+shape+'</b> ('+(64/prod(JSON.parse(shape)))+'분의 1) · 같은 조각을 가진 장치 <b>'+cp+'대</b>'+(cp>1?' (나누지 않은 메시 축을 따라 복제)':'');
+}
+
+/* ══════ 데모 6·7 · 두 층 MLP 실행기 ══════ */
+var MLPD=mlpData(20181105),MLPREF=runMLP(MLPD,mkMesh(['all'],[1]),{});
+function makeExec(root,cfg){
+  var st={mesh:cfg.mesh,lay:Object.assign({},cfg.layout),sel:0,op:cfg.op||'y'};
+  var meshEl=$('[data-r=mesh]',root),preEl=$('[data-r=pre]',root),cv=$('canvas',root);
+  meshEl.innerHTML=cfg.meshes.map(function(k){return '<button data-v="'+k+'" aria-pressed="'+(k===st.mesh)+'">'+k+'</button>';}).join('');
+  preEl.innerHTML=cfg.presets.map(function(p,i){return '<button data-i="'+i+'">'+p.label+'</button>';}).join('');
+  segInit(meshEl,function(v){st.mesh=v;st.sel=0;draw();});
+  preEl.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var p=cfg.presets[+b.dataset.i];st.mesh=p.mesh;st.lay=Object.assign({},p.layout);st.sel=0;segSet(meshEl,st.mesh);draw();});
+  ['batch','io','hidden'].forEach(function(d){$('[data-d='+d+']',root).addEventListener('change',function(){st.lay[d]=this.value;draw();});});
+  $('[data-r=ranks]',root).addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;st.sel=+b.dataset.v;draw();});
+  $('[data-r=ops]',root).addEventListener('click',function(e){var tr=e.target.closest('tr[data-k]');if(!tr)return;st.op=tr.dataset.k;draw();});
+  cv.addEventListener('click',function(){});
+  function draw(){
+    var mesh=getMesh(st.mesh);st.lay=cleanLayout(st.lay,mesh);
+    ['batch','io','hidden'].forEach(function(d){fillSel($('[data-d='+d+']',root),mesh,st.lay[d]);});
+    /* 장치 버튼: 메시 모양대로 */
+    var rk='',nm=mesh.names,sz=mesh.sizes,planes=sz.length>2?sz[2]:1,rows=sz.length>1?sz[0]:1,cols=sz.length>1?sz[1]:sz[0];
+    for(var p=0;p<planes;p++){rk+='<div class="mgrid" style="grid-template-columns:repeat('+cols+',minmax(30px,44px))">';
+      for(var i=0;i<rows;i++)for(var j=0;j<cols;j++){var r=sz.length>2?(i*cols+j)*planes+p:(sz.length>1?i*cols+j:j);
+        rk+='<button data-v="'+r+'" aria-pressed="'+(r===st.sel)+'">'+r+'</button>';}rk+='</div>';}
+    $('[data-r=ranks]',root).innerHTML=rk+'<span class="mini" style="margin:0">'+(sz.length>2?'planes = 0 | 1 · ':'')+(nm.length>1?'행 = '+nm[0]+', 열 = '+nm[1]:'1차원 메시 all')+'</span>';
+    /* 판정: 금지·나누어떨어짐 */
+    var illegal=null,nodiv=null;
+    Object.keys(MLP_SHAPES).forEach(function(k){var b=checkLegal(MLP_SHAPES[k],st.lay);if(b&&!illegal)illegal=[k].concat(b);});
+    Object.keys(st.lay).forEach(function(d){if(MLP_DIMS[d]%meshSize(mesh,st.lay[d]))nodiv=[d,st.lay[d]];});
+    var Wd=cv.clientWidth,g=1.2,cs=Math.min(26,(Wd-6)/(4+g+8+g+4)),tm=20;cv.dataset.h=Math.round(tm+(8+g+8)*cs+22);
+    var S=setup(cv),c=S.c,cx=2,ch=cx+(4+g)*cs,cy=ch+(8+g)*cs,by=tm+(8+g)*cs,lyb=by+8*cs+15;
+    var bad=function(k){return !!(illegal&&illegal[0]===k)||!!nodiv;};
+    function lbl(k){return k+' ['+MLP_SHAPES[k].join(', ')+']';}
+    drawTensor(c,{x:ch,y:tm+4*cs,cs:cs,dims:MLP_SHAPES.w,sizes:[4,8],lay:st.lay,mesh:mesh,sel:st.sel,bad:bad('w'),label:lbl('w'),ly:tm+4*cs-5});
+    drawTensor(c,{x:cy,y:tm,cs:cs,dims:MLP_SHAPES.v,sizes:[8,4],lay:st.lay,mesh:mesh,sel:st.sel,bad:bad('v'),label:'v',ly:tm-6});
+    drawTensor(c,{x:cx,y:by,cs:cs,dims:MLP_SHAPES.x,sizes:[8,4],lay:st.lay,mesh:mesh,sel:st.sel,bad:bad('x'),label:'x',ly:lyb});
+    drawTensor(c,{x:ch,y:by,cs:cs,dims:MLP_SHAPES.h,sizes:[8,8],lay:st.lay,mesh:mesh,sel:st.sel,bad:bad('h'),label:lbl('h'),ly:lyb});
+    drawTensor(c,{x:cy,y:by,cs:cs,dims:MLP_SHAPES.y,sizes:[8,4],lay:st.lay,mesh:mesh,sel:st.sel,bad:bad('y'),label:'y',ly:lyb});
+    font(c,10.5);c.fillStyle=css('--muted');c.textAlign='left';c.fillText('x [batch, io] · v [hidden, io] · y [batch, io]',cx,tm+2*cs);
+    c.fillText('파란 칸 = 장치 '+st.sel+'이 가진 조각',cx,tm+2*cs+14);
+    var msg=$('[data-r=msg]',root),out=$('[data-r=out]',root),ops=$('[data-r=ops]',root),pan=$('[data-r=pan]',root);
+    if(illegal||nodiv){
+      msg.innerHTML=illegal?'<span class="bad">금지 레이아웃 — 텐서 <b>'+illegal[0]+'</b>의 두 차원 <b>'+illegal[1]+'</b>, <b>'+illegal[2]+'</b>가 같은 메시 축 <code>'+illegal[3]+'</code>에 매핑됩니다(논문 8.5절). 실행하지 않습니다.</span>':
+        '<span class="bad">'+nodiv[0]+' 크기 '+MLP_DIMS[nodiv[0]]+'은 메시 축 '+nodiv[1]+' 크기 '+meshSize(mesh,nodiv[1])+'로 나누어떨어지지 않습니다(논문 5절: 현재 구현은 나누어떨어져야 함).</span>';
+      out.innerHTML='';ops.innerHTML='';pan.innerHTML='';return;}
+    var R=mlpCheck(MLPD,mesh,st.lay,MLPREF),ctx=R.ctx;
+    var head='<tr><th>연산</th><th>더해 없애는 차원</th><th>통신</th><th class="num">장치당 값</th></tr>';
+    ops.innerHTML=head+ctx.log.map(function(l){var cm=l.axes.length?'<span class="ar">all-reduce</span> '+l.axes.join('·')+' 축 · 그룹 '+l.groups.map(function(g){return '{'+g.join(',')+'}';}).join(' '):'<span class="mini" style="margin:0">없음</span>';
+      return '<tr data-k="'+l.key+'" class="'+(l.key===st.op?'on':'')+'"><td class="mono">'+l.name+'</td><td>'+l.red.map(function(d){return st.lay[d]?'<b>'+d+'</b>':d;}).join(', ')+'</td><td>'+cm+'</td><td class="num">'+(l.values||'—')+'</td></tr>';}).join('');
+    var held=ctx.held,pc=held.w[0].data.length+held.v[0].data.length+held.bias[0].data.length,ac=held.x[0].data.length+held.h[0].data.length+held.y[0].data.length;
+    out.innerHTML='<span>장치당 all-reduce 값<b>'+R.comm+'</b></span><span>장치당 파라미터 조각<b>'+pc+' / 72</b></span><span>장치당 활성 조각 (x, h, y)<b>'+ac+' / 128</b></span>'+
+      '<span>장치당 곱셈<b>'+fmtInt(ctx.mults)+' / '+fmtInt(MLPREF.mults)+'</b></span><span>단일 장치 결과와의 최대 오차<b style="color:'+(R.maxErr===0&&R.repErr===0?'var(--good)':'var(--s8)')+'">'+R.maxErr+(R.maxErr===0?' ✓':'')+'</b></span>';
+    var note='';cfg.presets.forEach(function(p){if(p.mesh===st.mesh&&JSON.stringify(cleanLayout(p.layout,mesh))===JSON.stringify(st.lay)&&p.note)note=p.note;});
+    var empty=!Object.keys(st.lay).length&&mesh.n>1;
+    msg.innerHTML=(empty?'<span class="bad">빈 레이아웃: 결과는 맞지만 장치 '+mesh.n+'대가 모두 같은 계산을 합니다. 시간도 메모리도 줄지 않습니다(논문 8.4절).</span> ':'')+note;
+    var L=ctx.log.filter(function(l){return l.key===st.op;})[0]||ctx.log[1];
+    var refS=sliceOf(MLPREF.out[L.key][0],st.lay,mesh,st.sel);
+    pan.innerHTML='<div class="dh">장치 '+st.sel+' · <code>'+L.name+'</code> — 표에서 다른 연산을 눌러 바꿀 수 있습니다</div><div class="pan3">'+
+      '<div><div class="mini">자기 조각만으로 계산 (all-reduce 전)</div>'+matHTML(L.pre[st.sel],'sm')+'</div>'+
+      '<div><div class="mini">'+(L.axes.length?'all-reduce 뒤':'통신 없음 → 그대로')+'</div>'+matHTML(ctx.out[L.key][st.sel],'sm')+'</div>'+
+      '<div><div class="mini">단일 장치 결과의 같은 조각</div>'+matHTML(refS,'sm')+'</div></div>';
+  }
+  root._draw=draw;draw();return draw;
+}
+var EX=[];
+
+/* ══════ 데모 8·9a · 레이아웃 판정기 ══════ */
+var JMODELS={
+ mlp:{dims:{batch:512,io:1024,hidden:4096},
+  tensors:[['x',['batch','io']],['w',['io','hidden']],['bias',['hidden']],['h',['batch','hidden']],['v',['hidden','io']],['y',['batch','io']]],
+  ops:[['xw = einsum(x, w)',['batch','io','hidden'],['batch','hidden']],['y = einsum(h, v)',['batch','hidden','io'],['batch','io']],
+       ['dv = einsum(h, dy)',['batch','hidden','io'],['hidden','io']],['dh = einsum(dy, v)',['batch','io','hidden'],['batch','hidden']],
+       ['dw = einsum(x, dpre)',['batch','io','hidden'],['io','hidden']],['dx = einsum(dpre, w)',['batch','hidden','io'],['batch','io']]],
+  meshes:['[8]','[2,4]','[2,2,2]']},
+ tf:{dims:{batch:256,length:256,memory_length:256,d_model:1024,heads:32,d_k:256,d_ff:32768,vocab:65536},
+  tensors:[['x',['batch','length','d_model']],['w_q·w_k·w_v',['d_model','heads','d_k']],['q',['batch','length','heads','d_k']],['k·v',['batch','memory_length','heads','d_k']],
+    ['logits',['batch','heads','length','memory_length']],['w_o',['heads','d_k','d_model']],['w_1',['d_model','d_ff']],['hid',['batch','length','d_ff']],['w_2',['d_ff','d_model']],
+    ['embedding',['vocab','d_model']],['out_logits',['batch','length','vocab']]],
+  ops:[['q = einsum(x, w_q)',['batch','length','d_model','heads','d_k'],['batch','length','heads','d_k']],
+       ['k = einsum(x, w_k)',['batch','memory_length','d_model','heads','d_k'],['batch','memory_length','heads','d_k']],
+       ['logits = einsum(q, k)',['batch','length','heads','d_k','memory_length'],['batch','heads','length','memory_length']],
+       ['o = einsum(logits, v)',['batch','heads','length','memory_length','d_k'],['batch','length','heads','d_k']],
+       ['x′ = einsum(o, w_o)',['batch','length','heads','d_k','d_model'],['batch','length','d_model']],
+       ['hid = einsum(x′, w_1)',['batch','length','d_model','d_ff'],['batch','length','d_ff']],
+       ['x″ = einsum(hid, w_2)',['batch','length','d_ff','d_model'],['batch','length','d_model']],
+       ['out_logits = einsum(x″, embedding)',['batch','length','d_model','vocab'],['batch','length','vocab']]],
+  meshes:['[32]','[512]','[16,32]']}
+};
+MESH_DEF['[32]']=[['all'],[32]];MESH_DEF['[512]']=[['all'],[512]];MESH_DEF['[16,32]']=[['rows','cols'],[16,32]];
+function judge(M,mesh,lay){
+  var tens=M.tensors.map(function(t){
+    var b=checkLegal(t[1],lay),nd=null,sl=t[1].map(function(d){var k=meshSize(mesh,lay[d]);if(M.dims[d]%k)nd=[d,lay[d]];return M.dims[d]/k;});
+    return {n:t[0],dims:t[1],bad:b,nd:nd,slice:sl,frac:prod(t[1].map(function(d){return meshSize(mesh,lay[d]);}))};});
+  var ops=M.ops.map(function(o){
+    var used=o[1].map(function(d){return lay[d];}).filter(Boolean),red=o[1].filter(function(d){return o[2].indexOf(d)<0;});
+    var axes=[];red.forEach(function(d){if(lay[d]&&axes.indexOf(lay[d])<0)axes.push(lay[d]);});
+    var rep=mesh.names.filter(function(m){return used.indexOf(m)<0&&meshSize(mesh,m)>1;});
+    var vals=axes.length?prod(o[2].map(function(d){return M.dims[d]/meshSize(mesh,lay[d]);})):0;
+    return {n:o[0],red:red,axes:axes,rep:rep,vals:vals,repf:prod(rep.map(function(m){return meshSize(mesh,m);}))};});
+  return {tens:tens,ops:ops};
+}
+function makeJudge(root,cfg){
+  var st={model:cfg.model,mesh:cfg.mesh,lay:Object.assign({},cfg.layout),row:3};
+  var modEl=$('[data-r=model]',root),meshEl=$('[data-r=mesh]',root),preEl=$('[data-r=pre]',root),selBox=$('[data-r=sels]',root),rowEl=$('[data-r=row]',root);
+  function presets(){return cfg.presets[st.model];}
+  if(modEl)segInit(modEl,function(v){st.model=v;st.mesh=JMODELS[v].meshes[st.model==='tf'?2:1];st.lay=Object.assign({},presets()[0].layout);build();});
+  segInit(meshEl,function(v){st.mesh=v;draw();});
+  preEl.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var p=presets()[+b.dataset.i];st.mesh=p.mesh;st.lay=Object.assign({},p.layout);segSet(meshEl,st.mesh);draw();});
+  selBox.addEventListener('change',function(e){var s=e.target.closest('select');if(!s)return;st.lay[s.dataset.d]=s.value;draw();});
+  if(rowEl)rowEl.addEventListener('input',function(){st.row=+this.value;draw();});
+  function build(){
+    var M=JMODELS[st.model];
+    meshEl.innerHTML=M.meshes.map(function(k){return '<button data-v="'+k+'" aria-pressed="'+(k===st.mesh)+'">'+k+'</button>';}).join('');
+    preEl.innerHTML=presets().map(function(p,i){return '<button data-i="'+i+'">'+p.label+'</button>';}).join('');
+    selBox.innerHTML=Object.keys(M.dims).map(function(d){return '<label class="dsel"><span>'+d+'</span><select data-d="'+d+'"></select></label>';}).join('');
+    var rw=$('[data-r=rowwrap]',root);if(rw)rw.style.display=st.model==='tf'?'':'none';
+    draw();
+  }
+  function draw(){
+    var M=JMODELS[st.model],mesh=getMesh(st.mesh);st.lay=cleanLayout(st.lay,mesh);
+    if(st.model==='tf'){M.dims.d_ff=T2[st.row][0];M.dims.heads=T2[st.row][1];var rv=$('[data-r=rowv]',root);if(rv)rv.textContent='d_ff '+fmtInt(T2[st.row][0])+' · heads '+T2[st.row][1]+' · '+T2[st.row][2]+'B';}
+    $$('select',selBox).forEach(function(s){fillSel(s,mesh,st.lay[s.dataset.d]);s.previousSibling.textContent=s.dataset.d+' '+fmtInt(M.dims[s.dataset.d]);});
+    var J=judge(M,mesh,st.lay),nBad=0,nNd=0,nRep=0;
+    var th='<tr><th>텐서</th><th>차원 → 메시 축</th><th>장치당 조각</th><th>판정</th></tr>';
+    $('[data-r=tens]',root).innerHTML=th+J.tens.map(function(t){
+      if(t.bad)nBad++;if(t.nd)nNd++;
+      var lay=t.dims.map(function(d){return st.lay[d]?'<b>'+d+'→'+st.lay[d]+'</b>':d;}).join(', ');
+      var v=t.bad?'<span class="bad">금지: '+t.bad[0]+'·'+t.bad[1]+'가 둘 다 '+t.bad[2]+'</span>':t.nd?'<span class="bad">'+t.nd[0]+' '+fmtInt(M.dims[t.nd[0]])+'은 '+meshSize(mesh,t.nd[1])+'로 안 나뉨</span>':
+        (t.frac===1?'<span class="mini" style="margin:0">모든 장치에 복제</span>':'1/'+t.frac+'씩');
+      return '<tr><td class="mono">'+t.n+'</td><td class="mono sm">'+lay+'</td><td class="mono sm">['+t.slice.map(function(x){return x%1?fmt(x,1):fmtInt(x);}).join(', ')+']</td><td>'+v+'</td></tr>';}).join('');
+    var oh='<tr><th>einsum</th><th>all-reduce</th><th class="num">장치당 값</th><th>같은 계산을 반복하는 메시 축</th></tr>';
+    $('[data-r=ops]',root).innerHTML=oh+J.ops.map(function(o){if(o.rep.length)nRep++;
+      return '<tr><td class="mono sm">'+o.n+'</td><td>'+(o.axes.length?'<span class="ar">'+o.axes.join('·')+'</span> ('+o.red.filter(function(d){return st.lay[d];}).join(', ')+' 더함)':'없음')+'</td><td class="num">'+(o.vals?big(o.vals):'—')+'</td><td>'+(o.rep.length?'<span class="warnx">'+o.rep.join('·')+' (×'+o.repf+' 중복)</span>':'<span style="color:var(--good)">없음 ✓</span>')+'</td></tr>';}).join('');
+    var v=$('[data-r=verdict]',root);
+    v.innerHTML=nBad||nNd?'<span class="bad"><b>쓸 수 없는 레이아웃</b> — '+(nBad?'금지된 텐서 '+nBad+'개':'')+(nBad&&nNd?', ':'')+(nNd?'나누어떨어지지 않는 텐서 '+nNd+'개':'')+'.</span>':
+      nRep?'<span class="warnx"><b>합법이지만 비효율</b> — einsum '+nRep+'개가 어떤 메시 축에서는 나뉘지 않아 같은 계산을 여러 장치가 반복합니다.</span>':
+      '<span style="color:var(--good)"><b>합법이고, 모든 einsum이 모든 메시 축에서 나뉩니다.</b></span> 장치당 all-reduce 값 합계(순전파 einsum만): <b>'+big(J.ops.reduce(function(s,o){return s+o.vals;},0))+'</b>';
+  }
+  build();root._draw=draw;return draw;
+}
+
+/* ══════ 데모 9b · Transformer 레이아웃 계산기 ══════ */
+function drawD9(){
+  var k=+$('#d9row').value,r=Math.pow(2,+$('#d9r').value),c=Math.pow(2,+$('#d9c').value),f=T2[k][0],h=T2[k][1];
+  $('#d9rowv').textContent='d_ff '+fmtInt(f)+' · heads '+h;$('#d9rv').textContent=r;$('#d9cv').textContent=c;
+  var R=tfCost(f,h,r,c);
+  $('#d9out').innerHTML=(R.ok?'':'<span class="bad" style="flex-basis:100%">heads '+h+' 또는 d_ff를 cols '+c+'로 나눌 수 없습니다 — 이 조합은 쓸 수 없습니다.</span>')+
+   '<span>장치 수 r × c<b>'+r+' × '+c+' = '+fmtInt(r*c)+'</b></span><span>전체 파라미터 (계산 / 표 2)<b>'+fmt(R.N/1e9,2)+'B / '+fmt(T2[k][2],2)+'B</b></span>'+
+   '<span>장치당 파라미터<b>'+big(R.perDev)+'</b></span><span>장치당 계산 (한 스텝)<b>'+fmt(R.flops/1e12,1)+' TFLOP</b></span>'+
+   '<span>cols 축 all-reduce (활성)<b>'+big(R.colComm)+'</b></span><span>rows 축 all-reduce (기울기)<b>'+big(R.rowComm)+'</b></span><span>통신 값 / 계산 1 MFLOP<b>'+fmt(R.ratio*1e6,1)+'</b></span>';
+  $('#d9tab').innerHTML='<tr><th>표 2 행</th><th class="num">d_ff</th><th class="num">heads</th><th class="num">장치당 파라미터</th><th class="num">장치당 TFLOP</th><th class="num">통신 / MFLOP</th></tr>'+
+   T2.map(function(t,i){var q=tfCost(t[0],t[1],r,c);return '<tr class="'+(i===k?'on':'')+'"><td>'+t[2]+'B</td><td class="num">'+fmtInt(t[0])+'</td><td class="num">'+t[1]+'</td>'+
+     (q.ok?'<td class="num">'+big(q.perDev)+'</td><td class="num">'+fmt(q.flops/1e12,1)+'</td><td class="num">'+fmt(q.ratio*1e6,1)+'</td>':'<td class="num bad" colspan="3">heads를 '+c+'로 못 나눔</td>')+'</tr>';}).join('');
+}
+
+/* ══════ 데모 10 · 같은 n대를 1D로 볼까 2D로 볼까 ══════ */
+function drawD10(){
+  var kn=+$('#d10n').value,n=Math.pow(2,kn),b=Math.pow(2,+$('#d10b').value),dh=Math.pow(2,+$('#d10h').value),dio=Math.pow(2,+$('#d10i').value);
+  $('#d10nv').textContent=fmtInt(n);$('#d10bv').textContent=fmtInt(b);$('#d10hv').textContent=fmtInt(dh);$('#d10iv').textContent=fmtInt(dio);
+  var opts=[];for(var i=0;i<=kn;i++){var r=Math.pow(2,i),c=n/r;opts.push({r:r,c:c,q:t1Cost(b,dio,dh,r,c)});}
+  var best=opts.reduce(function(a,o){return o.q.ratio<a.q.ratio?o:a;},opts[0]);
+  var b3={ratio:Infinity};for(var a=0;a<=kn;a++)for(var bb=0;a+bb<=kn;bb++){var rr=Math.pow(2,a),cc=Math.pow(2,bb),pp=n/(rr*cc);if(pp>dio||pp<2)continue;var q3=t1Cost(b,dio,dh,rr,cc,pp);if(q3.ratio<b3.ratio){b3=q3;b3.r=rr;b3.c=cc;b3.p=pp;}}
+  var S=setup($('#d10cv')),c2=S.c,L=52,R=10,T=22,B=40,W=S.w,H=S.h,mid=T+(H-T-B)*0.55;
+  var mx=Math.max.apply(null,opts.map(function(o){return o.q.ratio;})),mm=Math.max.apply(null,opts.map(function(o){return o.q.mem;}));
+  var lmx=Math.log10(mx),lmn=Math.log10(Math.min.apply(null,opts.map(function(o){return o.q.ratio;})))-0.3;
+  var bw=(W-L-R)/opts.length;
+  font(c2,12.5,'650');c2.fillStyle=css('--text-primary');c2.textAlign='left';c2.fillText('통신/계산 비율 (로그 축, 낮을수록 좋음)',4,14);
+  opts.forEach(function(o,i){var hh=(mid-T-4)*(Math.log10(o.q.ratio)-lmn)/(lmx-lmn),x=L+i*bw;
+    c2.fillStyle=o===best?css('--s3'):(i===0||i===kn)?css('--s2'):hexA(css('--s1'),0.75);c2.fillRect(x+bw*0.15,mid-hh,bw*0.7,hh);
+    var my=mid+16+(H-B-mid-16)*(1-o.q.mem/mm);c2.fillStyle=css('--s4');c2.beginPath();c2.arc(x+bw/2,my,3.5,0,7);c2.fill();
+    font(c2,10);c2.fillStyle=css('--text-secondary');c2.textAlign='center';
+    if(bw>34||i%2===0){c2.fillText(o.r+'×'+o.c,x+bw/2,H-B+14);}});
+  font(c2,10.5);c2.fillStyle=css('--muted');c2.textAlign='left';c2.fillText('● 장치당 메모리 (값 개수, 선형 축)',4,mid+12);
+  c2.textAlign='center';c2.fillText('메시 모양 rows(batch) × cols(hidden) — 왼쪽 끝 = 순수 모델 병렬, 오른쪽 끝 = 순수 데이터 병렬',L+(W-L)/2,H-8);
+  function rt(q){return q.ratio<0.001?q.ratio.toExponential(2):fmt(q.ratio,4);}
+  $('#d10out').innerHTML='<span>1D · batch만 ['+n+']<b>'+rt(opts[kn].q)+'</b></span><span>1D · hidden만 ['+n+']<b>'+rt(opts[0].q)+'</b></span>'+
+   '<span>가장 좋은 2D ['+best.r+', '+best.c+']<b style="color:var(--s3)">'+rt(best.q)+'</b></span>'+
+   (isFinite(b3.ratio)?'<span>가장 좋은 3D ['+b3.r+', '+b3.c+', '+b3.p+'] (io → planes)<b>'+rt(b3)+'</b></span>':'')+
+   '<span>2D 최적의 장치당 메모리<b>'+big(best.q.mem)+'</b></span>';
+}
+
+/* ══════ 데모 11 · 코드 한 줄만 바뀐다 ══════ */
+var D11={
+ dp:{mesh:'[("all", n)]',lay:'[("batch", "all")]',m:{all:8},l:{batch:'all'}},
+ mp:{mesh:'[("all", n)]',lay:'[("hidden", "all")]',m:{all:8},l:{hidden:'all'}},
+ dpmp:{mesh:'[("rows", r), ("cols", c)]',lay:'[("batch", "rows"), ("hidden", "cols")]',m:{rows:4,cols:2},l:{batch:'rows',hidden:'cols'}},
+ d3:{mesh:'[("rows", r), ("cols", c), ("planes", p)]',lay:'[("batch", "rows"), ("hidden", "cols"), ("io", "planes")]',m:{rows:2,cols:2,planes:2},l:{batch:'rows',hidden:'cols',io:'planes'}}
+};
+var d11k='dpmp';
+function drawD11(){
+  var P=D11[d11k],sz={batch:512,io:1024,hidden:4096};
+  $('#d11code').innerHTML=
+'<span class="cm"># 수학 모델 — 레이아웃과 무관하게 그대로 (논문 8절)</span>\n'+
+'batch  = mtf.Dimension("batch", b)\nio     = mtf.Dimension("io", d_io)\nhidden = mtf.Dimension("hidden", d_h)\n<span class="cm"># x.shape == [batch, io]</span>\n'+
+'w    = mtf.get_variable("w", shape=[io, hidden])\nbias = mtf.get_variable("bias", shape=[hidden])\nv    = mtf.get_variable("v", shape=[hidden, io])\n'+
+'h = mtf.relu(mtf.einsum(x, w, output_shape=[batch, hidden]) + bias)\ny = mtf.einsum(h, v, output_shape=[batch, io])\n\n'+
+'<span class="cm"># 분산 방법 — 이 두 줄만 바뀐다</span>\n<span class="hl">mesh_shape = '+esc(P.mesh)+'</span>\n<span class="hl">computation_layout = '+esc(P.lay)+'</span>';
+  var mesh=mkMesh(Object.keys(P.m),Object.keys(P.m).map(function(k){return P.m[k];}));
+  var rows=[['x',['batch','io']],['w',['io','hidden']],['bias',['hidden']],['h',['batch','hidden']],['v',['hidden','io']],['y',['batch','io']]];
+  $('#d11tab').innerHTML='<tr><th>텐서</th><th>전체 모양</th><th>장치당 조각 (b=512, d_io=1,024, d_h=4,096, 장치 8대: '+Object.keys(P.m).map(function(k){return k+' '+P.m[k];}).join(' × ')+')</th></tr>'+
+    rows.map(function(t){return '<tr><td class="mono">'+t[0]+'</td><td class="mono sm">['+t[1].join(', ')+']</td><td class="mono sm">['+t[1].map(function(d){var k=meshSize(mesh,P.l[d]);return k>1?'<b>'+fmtInt(sz[d]/k)+'</b>':fmtInt(sz[d]);}).join(', ')+']</td></tr>';}).join('');
+}
+
+/* ══════ 퀴즈 ══════ */
+var QZ=[
+ {q:'Mesh-TensorFlow 문법으로 데이터 병렬을 쓰면?',o:['mesh_shape = [("all", n)], computation_layout = [("batch", "all")]','mesh_shape = [("all", n)], computation_layout = []','파라미터마다 tf.device로 장치를 지정한다'],a:0,
+  e:'논문 4절의 예입니다. batch 차원을 가진 텐서는 모두 장치 수만큼 나뉘고, batch가 없는 텐서(파라미터)는 모든 장치에 복제됩니다. 빈 레이아웃 []은 모든 장치가 같은 계산을 반복할 뿐입니다.'},
+ {q:'두 층 예제에서 hidden만 메시 전체에 나누면 all-reduce는 어디서 생기나?',o:['dw, dv 기울기 계산에서','y = einsum(h, v)와 dx 계산 — 나뉜 hidden을 더해 없애는 곳','통신은 전혀 없다'],a:1,
+  e:'나뉜 차원을 더해 없애는 einsum에서만 all-reduce가 생깁니다. hidden을 줄이는 곳은 y와 dx 두 곳이고, 장치당 값은 2·b·d_io입니다(논문 8.2절). dw, dv는 batch를 줄이는데 batch는 나뉘지 않았으니 통신이 없습니다.'},
+ {q:'1차원 메시에서 [("batch", "all"), ("hidden", "all")]이 금지인 이유는?',o:['batch가 너무 작아서','텐서 h[batch, hidden]의 두 차원이 같은 메시 축에 매핑되기 때문','all-reduce가 너무 많아져서'],a:1,
+  e:'텐서 하나의 레이아웃은 단사(injective)여야 합니다. 두 차원을 같은 메시 축으로 자르면 장치 좌표 하나로 두 차원의 조각을 동시에 정할 수 없습니다(논문 5절·8.5절).'},
+ {q:'2 × 2 메시에서 batch → rows, hidden → cols일 때 y = einsum(h, v)의 all-reduce에 참여하는 장치는?',o:['4대 전부','같은 행에 있는 장치끼리(cols 축을 따라) 2대씩','같은 열에 있는 장치끼리 2대씩'],a:1,
+  e:'y가 더해 없애는 hidden은 cols 축에 나뉘어 있으므로, rows 좌표가 같고 cols 좌표만 다른 장치끼리 묶어 더합니다. 이것이 분할된(partitioned) all-reduce입니다. 랭크로는 {0,1}, {2,3}입니다(데모 7).'},
+ {q:'논문의 Transformer 레이아웃이 vocab, d_ff, heads를 나누는 이유는?',o:['세 차원이 가장 커서','모든 비싼 연산이 이 셋 중 정확히 하나를 갖고, 어떤 텐서도 둘 이상을 갖지 않기 때문','어텐션에서 통신을 완전히 없앨 수 있어서'],a:1,
+  e:'논문 9절 그대로입니다. 비싼 einsum마다 나뉜 차원이 하나 있으니 계산이 모두 나뉘고, 한 텐서에 둘이 함께 있지 않으니 금지 규칙에 걸리지 않습니다. 대신 어텐션 출력·FFN 출력에서 all-reduce가 생깁니다.'},
+ {q:'표 1에 따르면 데이터 병렬의 통신/계산 비율은 n/b다. 이것이 뜻하는 것은?',o:['장치당 배치 b/n이 작아질수록 통신에 묶인다','모델이 클수록 통신이 줄어든다','장치를 늘려도 비율은 변하지 않는다'],a:0,
+  e:'비율은 장치당 배치의 역수입니다. 장치를 늘리면서 배치를 그만큼 키우지 않으면 효율이 떨어집니다. 2D 레이아웃은 비율이 c/d_h + r/b라서, 장치 수를 제곱으로 늘려도 b와 d_h는 선형으로만 키우면 됩니다.'},
+ {q:'512코어 TPU(16 × 16 × 2 토러스)를 [512] 1차원 메시로 선언해도 되나?',o:['안 된다. 메시는 물리 배선과 같아야 한다','된다. 메시는 이름 붙이기 추상일 뿐이다. 다만 그룹이 물리적으로 붙어 있는지에 따라 all-reduce 성능이 달라진다','된다. 성능도 언제나 같다'],a:1,
+  e:'논문 2절: 같은 장치 집합 위에 [16, 16, 2], [32, 16], [512] 등 여러 메시를 정의할 수 있습니다. 하지만 메시 축 일부로 묶은 그룹이 물리적으로 연결돼 있을 때 all-reduce가 효율적입니다.'}
+];
+(function(){
+  var box=$('#quiz'),score=0,done=0;
+  QZ.forEach(function(it,qi){
+    var d=document.createElement('div');d.className='q';
+    d.innerHTML='<h4>Q'+(qi+1)+'. '+it.q+'</h4>'+it.o.map(function(o,j){return '<label class="opt"><input type="radio" name="q'+qi+'" value="'+j+'">'+esc(o)+'</label>';}).join('')+'<div class="expl"></div>';
+    box.appendChild(d);
+    $$('input',d).forEach(function(inp){inp.addEventListener('change',function(){
+      if(d.dataset.done)return;d.dataset.done=1;done++;
+      var j=+inp.value,ok=j===it.a;if(ok)score++;
+      $$('.opt',d).forEach(function(l,x){if(x===it.a)l.classList.add('correct');else if(x===j)l.classList.add('wrong');});
+      var ex=$('.expl',d);ex.textContent=(ok?'정답! ':'오답. ')+it.e;ex.classList.add('show');if(!ok)ex.classList.add('bad');
+      $('#quizScore').textContent=done+'문제 중 '+score+'개 정답'+(done===QZ.length?' — 끝!':'');
+    });});
+  });
+})();
+
+/* ══════ 연결·초기화 ══════ */
+['#d1n','#d1k','#d1b','#d1m'].forEach(function(s){$(s).addEventListener('input',onFrame(drawD1));});
+$('#d2s').addEventListener('input',onFrame(drawD2));segInit($('#d2task'),function(v){d2task=v;drawD2();});
+['#d3t','#d3n'].forEach(function(s){$(s).addEventListener('input',onFrame(drawD3));});segInit($('#d3m'),function(v){d3mode=v;drawD3();});
+segInit($('#d4n'),function(v){d4n=+v;drawD4();});segInit($('#d4r'),function(v){d4red=v;drawD4();});
+segInit($('#d5m'),function(v){d5.mesh=v;d5.sel=Math.min(d5.sel,7);drawD5();});
+$('#d5b').addEventListener('change',function(){d5.lay.batch=this.value;drawD5();});$('#d5h').addEventListener('change',function(){d5.lay.hidden=this.value;drawD5();});
+$('#d5cv').addEventListener('click',function(ev){var rc=this.getBoundingClientRect(),x=ev.clientX-rc.left,y=ev.clientY-rc.top,w=rc.width,narrow=w<600;
+  var bwid=narrow?w:w*0.46,cw=Math.min(78,(bwid-10)/4),chh=Math.min(70,cw*0.86),pc=Math.floor((x-4)/cw),pr=Math.floor((y-26)/(chh+8));
+  if(pc>=0&&pc<4&&pr>=0&&pr<2&&y>26){d5.sel=pr*4+pc;drawD5();}});
+['#d9row','#d9r','#d9c'].forEach(function(s){$(s).addEventListener('input',onFrame(drawD9));});
+$('#d9paper').addEventListener('click',function(){$('#d9row').value=6;$('#d9r').value=4;$('#d9c').value=5;drawD9();});
+['#d10n','#d10b','#d10h','#d10i'].forEach(function(s){$(s).addEventListener('input',onFrame(drawD10));});
+segInit($('#d11k'),function(v){d11k=v;drawD11();});
+
+EX.push(makeExec($('#ex1'),{meshes:['[2]','[4]','[8]'],mesh:'[4]',layout:{batch:'all'},op:'dw',presets:[
+  {label:'b 나누기 (데이터 병렬)',mesh:'[4]',layout:{batch:'all'},note:'논문 8.1절: 순전파에는 통신이 없고, 파라미터 기울기(dv, dw, dbias)에서 batch를 더해 없앨 때 all-reduce. 장치당 값 ≈ 2·d_io·d_h = 64 (+ 편향 d_h = 8).'},
+  {label:'h 나누기 (모델 병렬)',mesh:'[4]',layout:{hidden:'all'},note:'논문 8.2절: x, y는 복제, h·w·v·bias는 hidden을 따라 나뉨. y와 dx에서 hidden을 더해 없앨 때 all-reduce. 장치당 값 = 2·b·d_io = 64.'},
+  {label:'d 나누기 (io)',mesh:'[4]',layout:{io:'all'},note:'같은 규칙으로: h와 bias는 복제, x·w·v·y는 io를 따라 나뉨. xw와 dh에서 io를 더해 없앨 때 all-reduce. 장치당 값 = 2·b·d_h = 128.'},
+  {label:'빈 레이아웃',mesh:'[4]',layout:{}}]}));
+EX.push(makeExec($('#ex2'),{meshes:['[4]','[2,2]','[2,4]','[2,2,2]'],mesh:'[2,2]',layout:{batch:'rows',hidden:'cols'},op:'y',presets:[
+  {label:'batch → rows, hidden → cols',mesh:'[2,2]',layout:{batch:'rows',hidden:'cols'},note:'논문 8.3절: 장치당 값 = 2·b·d_io/r + 2·d_io·d_h/c = 32 + 32 (+ 편향 d_h/c = 4). y·dx는 cols 축으로, dv·dw·dbias는 rows 축으로 따로 묶여 더해집니다.'},
+  {label:'같은 레이아웃, 2 × 4 메시',mesh:'[2,4]',layout:{batch:'rows',hidden:'cols'},note:'2·b·d_io/r + 2·d_io·d_h/c = 32 + 16 (+ 편향 2). 그룹 크기가 축마다 다릅니다.'},
+  {label:'3D: + io → planes',mesh:'[2,2,2]',layout:{batch:'rows',hidden:'cols',io:'planes'},note:'논문 8.3절 끝: 모든 행렬이 두 메시 축으로 타일링되고 나머지 한 축으로 복제되며, einsum마다 메시 축 하나를 따라 all-reduce가 생깁니다.'},
+  {label:'금지: batch, hidden → 같은 축',mesh:'[4]',layout:{batch:'all',hidden:'all'}}]}));
+var J1=makeJudge($('#jg1'),{model:'mlp',mesh:'[2,4]',layout:{batch:'rows',hidden:'cols'},presets:{
+  mlp:[{label:'batch → rows, hidden → cols',mesh:'[2,4]',layout:{batch:'rows',hidden:'cols'}},{label:'데이터 병렬',mesh:'[8]',layout:{batch:'all'}},
+       {label:'빈 레이아웃',mesh:'[8]',layout:{}},{label:'batch만, 2D 메시',mesh:'[2,4]',layout:{batch:'rows'}},{label:'금지: batch·hidden → all',mesh:'[8]',layout:{batch:'all',hidden:'all'}},{label:'3D',mesh:'[2,2,2]',layout:{batch:'rows',hidden:'cols',io:'planes'}}],
+  tf:[]}});
+var J2=makeJudge($('#jg2'),{model:'tf',mesh:'[16,32]',layout:{batch:'rows',vocab:'cols',d_ff:'cols',heads:'cols'},presets:{mlp:[],
+  tf:[{label:'논문: batch → rows, vocab·d_ff·heads → cols',mesh:'[16,32]',layout:{batch:'rows',vocab:'cols',d_ff:'cols',heads:'cols'}},
+      {label:'논문: vocab·d_ff·heads → all',mesh:'[32]',layout:{vocab:'all',d_ff:'all',heads:'all'}},
+      {label:'데이터 병렬',mesh:'[32]',layout:{batch:'all'}},
+      {label:'d_model만 나누기',mesh:'[32]',layout:{d_model:'all'}},
+      {label:'금지: d_model·d_ff → all',mesh:'[32]',layout:{d_model:'all',d_ff:'all'}},
+      {label:'금지: length·memory_length',mesh:'[32]',layout:{length:'all',memory_length:'all'}},
+      {label:'512코어를 1D로',mesh:'[512]',layout:{vocab:'all',d_ff:'all',heads:'all'}}]}});
+
+function drawAll(){drawD1();drawD2();drawD3();drawD4();drawD5();EX.forEach(function(f){f();});J1();J2();drawD9();drawD10();drawD11();}
+var tbtn=$('#themeBtn');
+if(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)document.documentElement.setAttribute('data-theme','dark');
+function syncBtn(){tbtn.textContent=document.documentElement.getAttribute('data-theme')==='dark'?'◑ 라이트':'◐ 다크';}
+tbtn.addEventListener('click',function(){var d=document.documentElement.getAttribute('data-theme')==='dark';
+  document.documentElement.setAttribute('data-theme',d?'light':'dark');cssCache={};syncBtn();drawAll();});
+syncBtn();cssCache={};drawAll();
+/* 모바일은 스크롤할 때 주소창이 접히며 resize가 계속 온다. 폭이 바뀔 때만 다시 그린다 */
+var rz,lastW=document.documentElement.clientWidth;
+window.addEventListener('resize',function(){clearTimeout(rz);rz=setTimeout(function(){
+  var w=document.documentElement.clientWidth;if(w===lastW)return;lastW=w;drawAll();},120);});
+function km(){if(window.renderMathInElement&&!document.querySelector('.katex'))renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}]});}
+document.addEventListener('DOMContentLoaded',km);window.addEventListener('load',km);
+</script>
+</body>
+</html>
